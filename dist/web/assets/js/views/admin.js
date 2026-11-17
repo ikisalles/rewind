@@ -5,6 +5,7 @@ import { store, loadMe } from '../app.js';
 
 const TABS = [
   ['company', 'Company', 'building'],
+  ['modules', 'Modules', 'modules'],
   ['members', 'Members', 'user'],
   ['teams', 'Teams', 'team'],
   ['invites', 'Invites', 'mail'],
@@ -24,7 +25,7 @@ export async function adminView(root, { params }) {
     h('div', { class: 'tabs' }, TABS.map(([id, label, ic]) => h('a', { href: `#/admin/${id}`, class: `tab${tab === id ? ' active' : ''}` }, icon(ic, 14), label))),
     body,
   );
-  const views = { company, members, teams, invites, appearance };
+  const views = { company, members, teams, invites, appearance, modules };
   const reload = () => adminView(root, { params });
   return (views[tab] || company)(body, reload);
 }
@@ -197,6 +198,43 @@ function requestsSection(requests, allTeams, reload) {
           ),
         ),
       ),
+    ),
+  );
+}
+
+// ------------------------------------------------------------------ modules
+// What this Rewind has installed. Required modules are always on.
+async function modules(root) {
+  const { modules: list } = await get('/api/org/modules');
+  mount(
+    root,
+    section(
+      'Modules',
+      h('p', { class: 'muted small section-hint' }, 'Features available to your company. Each module adds its own pages to the menu.'),
+      h(
+        'div',
+        { class: 'panel list-panel' },
+        list.map((m) =>
+          h(
+            'div',
+            { class: 'list-row module-row' },
+            h(
+              'label',
+              { class: `switch${m.required ? ' locked' : ''}`, title: m.required ? `${m.name} can't be turned off for now` : undefined },
+              h('input', { type: 'checkbox', name: `module-${m.id}`, checked: m.enabled, disabled: m.required, 'aria-describedby': `module-${m.id}-hint` }),
+              h('span', { class: 'switch-ui' }),
+              h(
+                'span',
+                {},
+                h('strong', {}, m.name),
+                h('span', { class: 'muted small block', id: `module-${m.id}-hint` }, m.description),
+              ),
+            ),
+            m.required ? badge('Always on', 'neutral', 'lock') : null,
+          ),
+        ),
+      ),
+      list.every((m) => m.required) ? h('p', { class: 'muted small', style: { marginTop: '10px' } }, 'Retro is the only module for now, so it stays on. New modules will show up here to turn on or off.') : null,
     ),
   );
 }

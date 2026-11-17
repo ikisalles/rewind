@@ -1,12 +1,13 @@
 import { get, post, patch, del } from '@rewind/web/api.js';
 import { h, mount, button, field, badge, table, modal, fmtDate, fmtDateTime, today, attempt, confirmDialog, pageHeader, section } from '@rewind/web/ui.js';
 import { store } from '@rewind/web/app.js';
+import { loadTemplates, templatePicker } from './templates.js';
 
 export const statusBadge = (sprint) =>
   sprint.status === 'finished' ? badge('Finished', 'neutral', 'lock') : badge('Open', 'success', 'check');
 
 // ------------------------------------------------------------- one board
-export function sprintForm({ initial = {}, onSubmit, id }) {
+export function sprintForm({ initial = {}, onSubmit, id, extra = null }) {
   const start = initial.start || today();
   const end = initial.end || new Date(Date.now() + 13 * 864e5).toISOString().slice(0, 10);
   return h(
@@ -26,6 +27,7 @@ export function sprintForm({ initial = {}, onSubmit, id }) {
       field('Start date', h('input', { name: 'start', type: 'date', required: true, value: start })),
       field('End date', h('input', { name: 'end', type: 'date', required: true, value: end })),
     ),
+    extra,
   );
 }
 
@@ -33,22 +35,27 @@ export async function boardView(root, { params }) {
   const { board, sprints, canManage } = await get(`/api/boards/${params.boardId}`);
   const team = store.me.teams.find((t) => t.id === board.teamId);
 
-  const create = () => {
+  const create = async () => {
+    const templates = await attempt(loadTemplates);
+    if (!templates) return;
     const m = modal({
       title: 'New sprint',
+      wide: true,
       body: [
         sprintForm({
           id: 'sprint-form',
           initial: { name: `Sprint ${sprints.length + 1}` },
-          onSubmit: async (data) => {
-            const r = await attempt(() => post(`/api/boards/${board.id}/sprints`, data), 'Sprint created');
+          extra: templatePicker(templates),
+          onSubmit: async ({ startMode, template, ...data }) => {
+            const body = { ...data, template: startMode === 'blank' ? 'blank' : template };
+            const r = await attempt(() => post(`/api/boards/${board.id}/sprints`, body), 'Sprint created');
             if (r) {
               m.close();
               location.hash = `#/sprint/${r.sprint.id}`;
             }
           },
         }),
-        h('p', { class: 'muted small' }, 'The sprint starts with the default columns and hidden notes. You can change that on the board.'),
+        h('p', { class: 'muted small' }, 'Notes start hidden. You can change the columns and reveal the notes on the board.'),
       ],
       actions: [button('Cancel', { onClick: () => m.close() }), h('button', { class: 'btn btn-primary', type: 'submit', form: 'sprint-form' }, 'Create sprint')],
     });

@@ -114,6 +114,7 @@ function shell(content, path) {
     isAdmin && [
       h('div', { class: 'drawer-section' }, 'Administration'),
       item('#/admin/company', 'Company', 'building'),
+      item('#/admin/modules', 'Modules', 'modules'),
       item('#/admin/members', 'Members', 'user', store.me.pendingRequests),
       item('#/admin/teams', 'Teams', 'team'),
       item('#/admin/invites', 'Invites', 'mail'),

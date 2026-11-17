@@ -39,6 +39,7 @@ export function mount(target, ...children) {
 const ICONS = {
   menu: 'M3 6h18M3 12h18M3 18h18',
   home: 'M3 11l9-7 9 7M5 10v10h5v-6h4v6h5V10',
+  modules: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
   merge: 'M6 3v6a6 6 0 006 6h6M6 21v-6M15 12l3 3-3 3',
   userOff: 'M12 12a4 4 0 100-8 4 4 0 000 8zm-7 9a7 7 0 0114 0M3 3l18 18',
   unmerge: 'M6 3v18M12 8l4-4 4 4M16 4v9a4 4 0 01-4 4H8',

@@ -240,6 +240,21 @@ The deploy prints the URL (`https://xxxxxxxx.map.azionedge.net`). Open it and re
 To use social sign-in, register `https://<that domain>/api/auth/oauth/<provider>/callback` with the provider,
 put the credentials in `.env.azion`, then run `npm run azion:setup` and `npm run azion:deploy` again.
 
+**Domain**: the workload answers on `https://rewind.azion.app` (a free Azion custom domain, set in
+`workloads[].domains` of `azion.config.mjs`; each `azion.app` name belongs to one workload) and on the
+generated `*.map.azionedge.net` domain.
+
+**Bucket and prefix**: bucket names are global on Azion, so the first deploy may create a suffixed bucket
+(e.g. `rewind-20261117153022`). That name goes into `BUCKET` in `azion.config.mjs`, and `azion/azion.json`
+has `"prefix": "public"` with `"rotate-prefix": false`, so every deploy uploads `dist/web` to the same place
+the storage connector points at. If you deploy to another account, set `BUCKET` to the bucket the CLI creates there.
+
+**Older Azion accounts**: the CLI asks Azion which platform generation the account is on and, for accounts
+still flagged as v3, runs the legacy commands, which don't know workloads or `azion.app` domains (the deploy
+fails reading `azion/azion.json`). If the account can use the v4 API (`GET /v4/workspace/workloads` returns
+200), set `APIVersion = 'v4'` in `~/.azion/default/settings.toml` before deploying; the CLI checks again after
+24 hours. The lasting fix is to have the account moved to v4.
+
 **Next deploys**: `npm run azion:deploy`. The CLI updates the same resources because their IDs are in
 `azion/azion.json`, so keep that file committed.
 
