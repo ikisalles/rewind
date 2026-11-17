@@ -128,7 +128,8 @@ let app;
 async function handle(request) {
   if (!app) {
     const env = readEnv();
-    app = createRewind({ storage: sqlStorage(azionDriver(env.REWIND_DATABASE || 'rewind', env)), env });
+    // reads come from replicas that may be a moment behind the writes: read-your-writes on
+    app = createRewind({ storage: sqlStorage(azionDriver(env.REWIND_DATABASE || 'rewind', env)), env, consistency: 'eventual' });
   }
   return app.fetch(request);
 }

@@ -10,6 +10,7 @@ import retro from '@rewind/retro/server';
 
 export const MODULES = [retro];
 
-export function createRewind({ storage, env = {} }) {
-  return createApp({ storage, env, modules: MODULES });
+// consistency: 'eventual' for stores whose reads may lag behind writes (Azion SQL read replicas).
+export function createRewind({ storage, env = {}, consistency }) {
+  return createApp({ storage, env, modules: MODULES, consistency });
 }

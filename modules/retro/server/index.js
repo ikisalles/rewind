@@ -38,6 +38,8 @@ export default defineModule({
   description: 'Agile retrospectives: team boards, sprints with templates, notes, votes, merge and action items.',
   // the only module for now, so every company has it on
   required: true,
+  // looked up by an id from the URL or a share token: they should exist
+  keyPrefixes: ['board:', 'sprint:', 'sprintref:', 'note:', 'action:', 'share:'],
   register(core) {
     const { db, route, isAdmin, appUrl, teamMembers, getOrg, getTeam, listUsers } = core;
 
