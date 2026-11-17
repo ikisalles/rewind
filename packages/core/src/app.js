@@ -12,13 +12,24 @@ import { createRouter, corsHeaders, fail, HttpError, json, readJson, redirect } 
 import { hashPassword, newId, randomToken, verifyPassword } from './lib/crypto.js';
 import { authorizeUrl, enabledProviders, exchangeCode, PROVIDERS, PUBLIC_DOMAINS } from './auth/providers.js';
 import { escapeHtml, isColor, isEmail, normalizeOrgName, now, str } from './util.js';
+import { readYourWrites } from './storage/consistency.js';
+
+// Core keys that should exist when looked up (a token someone holds, an id from a link...):
+// on an eventually consistent store, a miss on them is read again before giving up.
+const CORE_KEY_PREFIXES = ['session:', 'authcode:', 'oauth:', 'user:', 'org:', 'cred:', 'team:', 'invite:'];
 
 const SESSION_TTL = 60 * 60 * 24 * 30; // 30 days
 const INVITE_TTL = 60 * 60 * 24 * 14; // 14 days
 
 const THEME_KEYS = ['bg', 'surface', 'surface2', 'border', 'text', 'muted', 'accent', 'accentText', 'success', 'danger', 'link'];
 
-export function createApp({ storage: db, env = {}, modules = [] }) {
+// consistency: 'strong' (default) or 'eventual' for stores whose reads may lag behind writes
+// (e.g. Azion SQL Database read replicas): turns on read-your-writes, see storage/consistency.js.
+export function createApp({ storage, env = {}, modules = [], consistency = 'strong' }) {
+  const db =
+    consistency === 'eventual'
+      ? readYourWrites(storage, { retryPrefixes: [...CORE_KEY_PREFIXES, ...modules.flatMap((m) => m.keyPrefixes || [])] })
+      : storage;
   const router = createRouter();
   const route = (method, path, fn, opts = {}) => router.add(method, path, { fn, ...opts });
 

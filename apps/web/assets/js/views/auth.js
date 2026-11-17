@@ -9,9 +9,12 @@ function card(...children) {
   return h('div', { class: 'auth-card' }, h('div', { class: 'auth-brand' }, logo(), h('p', { class: 'slogan' }, SLOGAN)), children);
 }
 
+const isLocal = () => ['localhost', '127.0.0.1', '[::1]', '::1'].includes(location.hostname) || location.hostname.endsWith('.localhost');
+
 function socialButtons(providers, invite) {
   if (!providers.length) {
-    // Nothing configured on this server: say so instead of silently hiding the option.
+    // Nothing configured: a hint for whoever runs Rewind locally; deployed instances just hide it.
+    if (!isLocal()) return null;
     return h(
       'p',
       { class: 'notice small' },
