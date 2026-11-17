@@ -3,6 +3,7 @@ import { h, mount, button, field, badge, modal, icon, avatar, fmtDate, attempt, 
 import { applyTheme } from '@rewind/web/theme.js';
 import { logo, footer, APP_NAME, store } from '@rewind/web/app.js';
 import { statusBadge, sprintForm } from './boards.js';
+import { loadTemplates, templatePicker } from './templates.js';
 
 const POLL_MS = Math.max(2, Number(window.REWIND_CONFIG?.pollSeconds) || 4) * 1000;
 
@@ -160,6 +161,21 @@ function noteCard(note, column, state, opts) {
 
 function columnsView(state, opts) {
   const finished = state.sprint.status === 'finished';
+  if (!state.sprint.columns.length) {
+    const manage = !opts.readOnly && state.canManage && !finished;
+    return h(
+      'div',
+      { class: 'panel empty-board' },
+      icon('columns', 22),
+      h('h3', {}, 'This retro has no columns yet'),
+      manage
+        ? [
+            h('p', { class: 'muted' }, 'Add the columns the team will write in, or start from a template.'),
+            h('div', { class: 'btn-group' }, button('Add columns', { variant: 'primary', iconName: 'plus', onClick: opts.onSetupColumns }), button('Use a template', { iconName: 'board', onClick: opts.onUseTemplate })),
+          ]
+        : h('p', { class: 'muted' }, 'The retro admin is setting up the columns. Notes can be added as soon as they are ready.'),
+    );
+  }
   return h(
     'div',
     { class: 'columns', style: { '--cols': state.sprint.columns.length } },
@@ -264,7 +280,7 @@ export async function sprintView(root, { params }) {
   const composer = (col) => {
     let ta = composers.get(col.id);
     if (!ta) {
-      ta = h('textarea', { rows: 2, maxlength: 2000, placeholder: 'Write a note... (Ctrl+Enter)', 'aria-label': `New note in ${col.title}` });
+      ta = h('textarea', { rows: 2, maxlength: 2000, placeholder: `${col.hint || 'Write a note...'} (Ctrl+Enter)`, 'aria-label': `New note in ${col.title}` });
       const submit = async () => {
         const text = ta.value.trim();
         if (!text) return;
@@ -293,6 +309,8 @@ export async function sprintView(root, { params }) {
   const noteHandlers = {
     readOnly: false,
     composer,
+    onSetupColumns: () => columnsDialog(),
+    onUseTemplate: () => templateDialog(),
     onDropMerge: async (sourceId, target) => {
       const source = state.notes.find((n) => n.id === sourceId);
       if (!source) return;
@@ -427,30 +445,46 @@ export async function sprintView(root, { params }) {
 
   const columnsDialog = () => {
     let cols = state.sprint.columns.map((c) => ({ ...c }));
+    // with notes on the board there must be a column to keep them in
+    const minCols = state.notes.length ? 1 : 0;
     const list = h('div', { class: 'stack-sm' });
+    const palette = ['#22c55e', '#ef4444', '#3b82f6', '#f59e0b', '#a855f7', '#ec4899', '#14b8a6', '#f3652b'];
     const draw = () =>
       mount(
         list,
-        cols.map((c, i) =>
-          h(
-            'div',
-            { class: 'col-edit' },
-            h('input', { type: 'color', value: c.color, 'aria-label': 'Color', onInput: (e) => (c.color = e.target.value) }),
-            h('input', { value: c.title, maxlength: 60, 'aria-label': 'Title', onInput: (e) => (c.title = e.target.value) }),
-            button('', { iconName: 'x', variant: 'ghost', size: 'xs', title: 'Remove column', disabled: cols.length <= 1, onClick: () => ((cols = cols.filter((_, j) => j !== i)), draw()) }),
-            h('span', { class: 'col-move' },
-              button('↑', { variant: 'ghost', size: 'xs', title: 'Move up', disabled: i === 0, onClick: () => (([cols[i - 1], cols[i]] = [cols[i], cols[i - 1]]), draw()) }),
-              button('↓', { variant: 'ghost', size: 'xs', title: 'Move down', disabled: i === cols.length - 1, onClick: () => (([cols[i + 1], cols[i]] = [cols[i], cols[i + 1]]), draw()) })),
-          ),
-        ),
+        cols.length
+          ? cols.map((c, i) =>
+              h(
+                'div',
+                { class: 'col-edit' },
+                h('input', { type: 'color', value: c.color, 'aria-label': 'Color', onInput: (e) => (c.color = e.target.value) }),
+                h('input', { value: c.title, maxlength: 60, 'aria-label': 'Title', placeholder: 'Column title', onInput: (e) => (c.title = e.target.value) }),
+                button('', { iconName: 'x', variant: 'ghost', size: 'xs', title: 'Remove column', disabled: cols.length <= minCols, onClick: () => ((cols = cols.filter((_, j) => j !== i)), draw()) }),
+                h('span', { class: 'col-move' },
+                  button('↑', { variant: 'ghost', size: 'xs', title: 'Move up', disabled: i === 0, onClick: () => (([cols[i - 1], cols[i]] = [cols[i], cols[i - 1]]), draw()) }),
+                  button('↓', { variant: 'ghost', size: 'xs', title: 'Move down', disabled: i === cols.length - 1, onClick: () => (([cols[i + 1], cols[i]] = [cols[i], cols[i + 1]]), draw()) })),
+                h('input', { class: 'col-hint', value: c.hint || '', maxlength: 120, 'aria-label': 'Prompt', placeholder: 'Prompt shown in the note box (optional), e.g. What went well?', onInput: (e) => (c.hint = e.target.value) }),
+              ),
+            )
+          : h('p', { class: 'muted small' }, 'No columns yet. Add the first one.'),
       );
     draw();
     const m = modal({
       title: 'Board columns',
       body: [
         list,
-        button('Add column', { iconName: 'plus', variant: 'ghost', onClick: () => (cols.push({ id: '', title: 'New column', color: '#a855f7' }), draw()) }),
-        h('p', { class: 'muted small' }, 'Notes from removed columns move to the first column.'),
+        button('Add column', {
+          iconName: 'plus',
+          variant: 'ghost',
+          disabled: false,
+          onClick: () => {
+            if (cols.length >= 8) return;
+            cols.push({ id: '', title: cols.length ? 'New column' : 'Column 1', color: palette[cols.length % palette.length], hint: '' });
+            draw();
+            list.querySelectorAll('.col-edit input:not([type=color]):not(.col-hint)')[cols.length - 1]?.select();
+          },
+        }),
+        h('p', { class: 'muted small' }, 'Up to 8 columns. Notes from removed columns move to the first column.'),
       ],
       actions: [
         button('Cancel', { onClick: () => m.close() }),
@@ -458,6 +492,36 @@ export async function sprintView(root, { params }) {
           variant: 'primary',
           onClick: async () => {
             if (await attempt(() => patch(sprintUrl, { columns: cols }), 'Columns updated')) {
+              m.close();
+              refresh();
+            }
+          },
+        }),
+      ],
+    });
+    if (!cols.length) list.parentElement?.querySelector('button')?.focus();
+  };
+
+  // Replace the columns with a template's (also how a blank retro gets a format later).
+  const templateDialog = async () => {
+    const templates = await attempt(loadTemplates);
+    if (!templates) return;
+    const form = h('form', { id: 'template-form', class: 'stack' }, templatePicker(templates, { allowBlank: false, selected: state.sprint.template }));
+    const m = modal({
+      title: 'Use a template',
+      wide: true,
+      body: [
+        form,
+        state.notes.length ? h('p', { class: 'muted small' }, "The board's columns are replaced. Notes in columns the template doesn't have move to its first column.") : null,
+      ],
+      actions: [
+        button('Cancel', { onClick: () => m.close() }),
+        button('Use template', {
+          variant: 'primary',
+          onClick: async () => {
+            const template = new FormData(form).get('template');
+            if (!template) return;
+            if (await attempt(() => patch(sprintUrl, { template }), 'Columns updated')) {
               m.close();
               refresh();
             }
@@ -628,6 +692,7 @@ export async function sprintView(root, { params }) {
             h('input', { type: 'number', min: 0, max: 50, value: s.votesPerUser, onChange: (e) => setVotes(e.target.value) }),
           ),
           button('Columns', { iconName: 'columns', onClick: columnsDialog }),
+          button('Template', { iconName: 'board', onClick: templateDialog }),
         );
       }
       items.push(button('Share', { iconName: 'share', onClick: shareDialog }));

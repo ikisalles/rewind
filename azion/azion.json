@@ -1,14 +1,25 @@
 {
   "name": "rewind",
-  "bucket": "",
+  "bucket": "rewind-20261117153022",
   "preset": "javascript",
   "env": "production",
-  "prefix": "",
-  "rotate-prefix": true,
-  "function": [],
+  "prefix": "public",
+  "rotate-prefix": false,
+  "not-first-run": true,
+  "function": [
+    {
+      "id": 110169,
+      "name": "rewind-api",
+      "file": "",
+      "args": "azion/args.json",
+      "instance-id": 64824,
+      "instance-name": "",
+      "cache-id": 0
+    }
+  ],
   "application": {
-    "id": 0,
-    "name": "__DEFAULT__"
+    "id": 1794940638,
+    "name": "rewind"
   },
   "domain": {
     "id": 0,
@@ -22,15 +33,48 @@
   "origin": null,
   "rules-engine": {
     "created": false,
-    "rules": null
+    "rules": [
+      {
+        "id": 1549345,
+        "name": "API",
+        "phase": "request"
+      },
+      {
+        "id": 1549346,
+        "name": "Static assets",
+        "phase": "request"
+      },
+      {
+        "id": 1549347,
+        "name": "SPA shell",
+        "phase": "request"
+      }
+    ]
   },
-  "cache-settings": null,
+  "cache-settings": [
+    {
+      "id": 394996,
+      "name": "rewind-static"
+    }
+  ],
   "workloads": {
-    "id": 0,
-    "name": "",
-    "domains": null,
-    "url": "",
-    "deployment_id": null
+    "id": 1794941370,
+    "name": "rewind",
+    "domains": [
+      "rewind.azion.app"
+    ],
+    "url": "https://0dmzcsj34ek.map.azionedge.net",
+    "deployment_id": [
+      {
+        "id": 362038,
+        "name": "rewind"
+      }
+    ]
   },
-  "connectors": null
+  "connectors": [
+    {
+      "id": 236197,
+      "name": "rewind-static"
+    }
+  ]
 }
