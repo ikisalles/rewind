@@ -384,3 +384,185 @@ test('sprint templates: list, create from a template, blank start and apply late
   assert.equal(state.notes[0].columnId, 'mad');
   assert.equal((await call('PATCH', `/api/sprints/${blank.id}`, { template: 'nope' }, admin)).status, 400);
 });
+
+test('finishing saves the action items: all or nothing, and only then the retro closes', async () => {
+  const { call } = setup();
+  const { admin, bia, me, sprint } = await bootstrap(call);
+  const sid = sprint.id;
+  const a = (await call('POST', `/api/sprints/${sid}/notes`, { columnId: 'good', text: 'Slow CI' }, bia)).data.note;
+  const b = (await call('POST', `/api/sprints/${sid}/notes`, { columnId: 'good', text: 'Flaky tests' }, bia)).data.note;
+  await call('POST', `/api/sprints/${sid}/notes/${b.id}/vote`, {}, bia);
+
+  // one bad item: nothing is saved and the retro stays open
+  const bad = await call('POST', `/api/sprints/${sid}/finish`, { actions: [{ noteId: b.id, text: 'Quarantine flaky tests' }, { noteId: a.id, text: '' }] }, admin);
+  assert.equal(bad.status, 400);
+  let state = (await call('GET', `/api/sprints/${sid}`, null, admin)).data;
+  assert.equal(state.sprint.status, 'open');
+  assert.equal(state.actions.length, 0);
+  assert.equal((await call('POST', `/api/sprints/${sid}/finish`, { actions: [{ noteId: 'not-a-note', text: 'x' }] }, admin)).status, 400);
+  assert.equal((await call('POST', `/api/sprints/${sid}/finish`, { actions: [{ noteId: a.id, text: 'x', ownerId: 'stranger' }] }, admin)).status, 400);
+  assert.equal((await call('POST', `/api/sprints/${sid}/finish`, { actions: [] }, bia)).status, 403);
+
+  // all good: the retro closes and the items exist
+  const ok = await call('POST', `/api/sprints/${sid}/finish`, { actions: [
+    { noteId: b.id, text: 'Quarantine flaky tests', ownerId: me.user.id, due: '2026-12-01' },
+    { noteId: a.id, text: 'Cache dependencies' },
+  ] }, admin);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.data.top[0], b.id);
+  assert.equal(ok.data.actions.length, 2);
+  state = (await call('GET', `/api/sprints/${sid}`, null, bia)).data;
+  assert.equal(state.sprint.status, 'finished');
+  assert.deepEqual(state.actions.map((x) => [x.text, x.noteId]).sort(), [['Cache dependencies', a.id], ['Quarantine flaky tests', b.id]]);
+  // a finished retro can't be finished again (reopen first)
+  assert.equal((await call('POST', `/api/sprints/${sid}/finish`, {}, admin)).status, 409);
+
+  // later, more items are saved together from the results window
+  const more = await call('POST', `/api/sprints/${sid}/actions`, { actions: [{ noteId: a.id, text: 'Split the pipeline' }, { noteId: b.id, text: 'Track flakiness' }] }, admin);
+  assert.equal(more.status, 201);
+  assert.equal(more.data.actions.length, 2);
+  assert.equal((await call('GET', `/api/sprints/${sid}`, null, admin)).data.actions.length, 4);
+});
+
+test('live updates: who may connect, and a message after every successful change', async () => {
+  const { memoryRealtime } = await import('@rewind/core/realtime/memory');
+  const realtime = memoryRealtime();
+  const { call, app } = setupApp({ modules: [retro], realtime });
+  const { admin, bia, sprint } = await bootstrap(call);
+  const live = (token, extra = {}) =>
+    app.fetch(new Request(`https://rewind.test/api/sprints/${sprint.id}/live`, { headers: { upgrade: 'websocket', ...(token ? { 'sec-websocket-protocol': `rewind, ${token}` } : {}), ...extra } }));
+
+  const ok = await live(bia);
+  assert.equal(ok.headers.get('x-rewind-upgrade'), `sprint:${sprint.id}`);
+  assert.equal((await live(null)).status, 401);
+  assert.equal((await live('not-a-session')).status, 401);
+  assert.equal((await app.fetch(new Request(`https://rewind.test/api/sprints/${sprint.id}/live`, { headers: { authorization: `Bearer ${bia}` } }))).status, 426);
+
+  // someone from another company can't listen
+  const other = (await call('POST', '/api/auth/signup', { orgName: 'Other Co', name: 'Eve', email: 'eve@other.io', password: 'strong-pass' })).data.token;
+  assert.ok([403, 404].includes((await live(other)).status));
+
+  const got = [];
+  realtime.subscribe(`sprint:${sprint.id}`, (m) => got.push(JSON.parse(m).type));
+  await call('POST', `/api/sprints/${sprint.id}/notes`, { columnId: 'good', text: 'live!' }, bia);
+  assert.deepEqual(got, ['changed']);
+  await call('GET', `/api/sprints/${sprint.id}`, null, bia); // reads don't notify
+  await call('POST', `/api/sprints/${sprint.id}/notes`, { columnId: 'nope', text: 'x' }, bia); // failed changes don't either
+  assert.equal(got.length, 1);
+  await call('PATCH', `/api/sprints/${sprint.id}`, { hidden: false }, admin);
+  assert.equal(got.length, 2);
+
+  // the core says live updates are available
+  assert.equal((await call('GET', '/api/config')).data.realtime, true);
+  assert.equal((await setupApp({ modules: [retro] }).call('GET', '/api/config')).data.realtime, false);
+});
+
+test('live updates: one room per sprint, so parallel retros never mix', async () => {
+  const { memoryRealtime } = await import('@rewind/core/realtime/memory');
+  const { durableRealtime } = await import('@rewind/core/realtime/durable');
+
+  // two boards, each with a retro in progress, plus a second open sprint on the first board
+  const realtime = memoryRealtime();
+  const { call, app } = setupApp({ modules: [retro], realtime });
+  const { admin, me, board, sprint: a } = await bootstrap(call);
+  const other = (await call('POST', '/api/boards', { name: 'Squad B', teamId: me.org.defaultTeamId }, admin)).data.board;
+  const b = (await call('POST', `/api/boards/${other.id}/sprints`, { name: 'B1', start: '2026-11-01', end: '2026-11-14' }, admin)).data.sprint;
+  const a2 = (await call('POST', `/api/boards/${board.id}/sprints`, { name: 'A2', start: '2026-11-15', end: '2026-11-28' }, admin)).data.sprint;
+
+  // each live connection is bound to its sprint's room
+  const room = async (id) => (await app.fetch(new Request(`https://rewind.test/api/sprints/${id}/live`, { headers: { upgrade: 'websocket', 'sec-websocket-protocol': `rewind, ${admin}` } }))).headers.get('x-rewind-upgrade');
+  assert.deepEqual([await room(a.id), await room(b.id), await room(a2.id)], [`sprint:${a.id}`, `sprint:${b.id}`, `sprint:${a2.id}`]);
+
+  const got = { [a.id]: 0, [b.id]: 0, [a2.id]: 0 };
+  for (const id of Object.keys(got)) realtime.subscribe(`sprint:${id}`, () => got[id]++);
+  await call('POST', `/api/sprints/${b.id}/notes`, { columnId: 'good', text: 'only B' }, admin);
+  assert.deepEqual(got, { [a.id]: 0, [b.id]: 1, [a2.id]: 0 });
+  await call('POST', `/api/sprints/${a2.id}/notes`, { columnId: 'good', text: 'only A2' }, admin);
+  await call('PATCH', `/api/sprints/${a.id}`, { hidden: false }, admin);
+  assert.deepEqual(got, { [a.id]: 1, [b.id]: 1, [a2.id]: 1 });
+
+  // with Durable Objects, each sprint gets its own object, named after the sprint
+  const names = [];
+  const namespace = { idFromName: (n) => (names.push(n), n), get: (id) => ({ fetch: async () => new Response(null, { headers: { 'x-room': id } }) }) };
+  const { call: call2, app: app2 } = setupApp({ modules: [retro], realtime: durableRealtime(namespace) });
+  const s = await bootstrap(call2);
+  const live = await app2.fetch(new Request(`https://rewind.test/api/sprints/${s.sprint.id}/live`, { headers: { upgrade: 'websocket', 'sec-websocket-protocol': `rewind, ${s.admin}` } }));
+  assert.equal(live.headers.get('x-room'), `sprint:${s.sprint.id}`);
+  names.length = 0;
+  await call2('POST', `/api/sprints/${s.sprint.id}/notes`, { columnId: 'good', text: 'x' }, s.admin);
+  assert.deepEqual(names, [`sprint:${s.sprint.id}`]);
+});
+
+test('two servers, one lagging database: a change never undoes another (the lost columns bug)', async () => {
+  const { createApp } = await import('@rewind/core');
+  const { memoryStorage } = await import('@rewind/core/storage/memory');
+  const { memoryRealtime } = await import('@rewind/core/realtime/memory');
+  // writes go to the main copy; reads come from a replica that catches up 400 ms later
+  const main = memoryStorage();
+  const replica = memoryStorage();
+  const sync = (k) => setTimeout(async () => { const v = await main.get(k); if (v === null) await replica.delete(k); else await replica.put(k, v); }, 400);
+  const shared = {
+    get: (k) => replica.get(k), list: (p) => replica.list(p),
+    put: async (k, v, o) => (await main.put(k, v, o), sync(k)),
+    delete: async (k) => (await main.delete(k), sync(k)),
+    patch: async (k, f) => (await main.patch(k, f), sync(k)),
+    touch: async (k, f, a) => (await main.touch(k, f, a), sync(k)),
+  };
+  const realtime = memoryRealtime();
+  const edge = () => {
+    const app = createApp({ storage: shared, modules: [retro], consistency: 'eventual', realtime, env: { APP_URL: 'https://rewind.test' } });
+    return async (method, path, body, token) => {
+      const res = await app.fetch(new Request(`https://rewind.test${path}`, { method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: body ? JSON.stringify(body) : undefined }));
+      return { status: res.status, data: await res.json(), rev: res.headers.get('x-rewind-rev') };
+    };
+  };
+  const A = edge();
+  const B = edge(); // another edge location: no memory of A's writes
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const { token } = (await A('POST', '/api/auth/signup', { orgName: 'Lag Co', name: 'Ana', email: 'ana@lag.io', password: 'strong-pass' })).data;
+  const me = (await A('GET', '/api/me', null, token)).data;
+  const board = (await A('POST', '/api/boards', { name: 'B', teamId: me.org.defaultTeamId }, token)).data.board;
+  const sprint = (await A('POST', `/api/boards/${board.id}/sprints`, { name: 'S', start: '2026-11-01', end: '2026-11-14', template: 'blank' }, token)).data.sprint;
+  await wait(500); // everything so far has reached the replica
+
+  const revs = [];
+  realtime.subscribe(`sprint:${sprint.id}`, (m) => revs.push(JSON.parse(m).rev));
+
+  // A adds three columns; B, still reading the blank sprint, changes another setting right away
+  const cols = await A('PATCH', `/api/sprints/${sprint.id}`, { columns: [{ title: 'Kudos' }, { title: 'Blockers' }, { title: 'Ideas' }] }, token);
+  assert.equal(cols.status, 200);
+  assert.match(cols.rev, new RegExp(`^${sprint.id}:\\d+$`));
+  assert.equal((await B('PATCH', `/api/sprints/${sprint.id}`, { hidden: false, votesPerUser: 5 }, token)).status, 200);
+  await wait(500);
+
+  const state = (await B('GET', `/api/sprints/${sprint.id}`, null, token)).data;
+  assert.deepEqual(state.sprint.columns.map((c) => c.title), ['Kudos', 'Blockers', 'Ideas']); // not undone
+  assert.equal(state.sprint.hidden, false);
+  assert.equal(state.sprint.votesPerUser, 5);
+  // every change bumped the revision, which only grows, and went out with the live message
+  assert.equal(revs.length, 2);
+  assert.ok(revs[1] >= revs[0]); // published: the time of each change (two can share a millisecond)
+  assert.ok(state.sprint.rev >= revs[1] && state.sprint.rev > revs[0]); // stored: strictly grows
+});
+
+test('notes whose column is gone stay visible in a "Recovered" column', async () => {
+  const { call } = setup();
+  const { admin, sprint } = await bootstrap(call);
+  const n = (await call('POST', `/api/sprints/${sprint.id}/notes`, { columnId: 'ideas', text: 'keep me' }, admin)).data.note;
+  // simulate the damaged sprint seen in production: its columns were wiped, the notes were not
+  const { storage } = setupApp.last;
+  const key = [...storage.data.keys()].find((k) => k.startsWith('sprint:') && k.endsWith(sprint.id));
+  await storage.patch(key, { columns: [] });
+
+  let state = (await call('GET', `/api/sprints/${sprint.id}`, null, admin)).data;
+  const orphan = state.sprint.columns.find((c) => c.id === 'ideas');
+  assert.equal(orphan.orphan, true);
+  assert.equal(orphan.title, 'Unsorted');
+  assert.equal(state.notes.find((x) => x.id === n.id).columnId, 'ideas');
+
+  // saving the columns as shown makes the recovered one real
+  assert.equal((await call('PATCH', `/api/sprints/${sprint.id}`, { columns: state.sprint.columns.map(({ id, title, color }) => ({ id, title: title === 'Unsorted' ? 'Ideas' : title, color })) }, admin)).status, 200);
+  state = (await call('GET', `/api/sprints/${sprint.id}`, null, admin)).data;
+  assert.deepEqual(state.sprint.columns.map((c) => [c.title, Boolean(c.orphan)]), [['Ideas', false]]);
+});

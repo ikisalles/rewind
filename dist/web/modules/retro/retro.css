@@ -99,3 +99,8 @@ body.note-dragging .note:not(.dragging) { transition: outline-color .1s; }
 @media (max-width: 720px) {
   .start-modes { grid-template-columns: 1fr; }
 }
+
+/* action items written in a window but not saved yet */
+.action.draft { border-style: dashed; }
+.draft-dot { flex: none; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--warning); }
+.drafts:empty { display: none; }

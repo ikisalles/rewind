@@ -1,10 +1,30 @@
 // Test helpers shared by the core and the modules: an in-memory app and HTTP-like calls.
 import { memoryStorage } from '../src/storage/memory.js';
-import { createApp } from '../src/app.js';
+import { durableStorage } from '../src/storage/durable.js';
+import { createApp, CORE_SHARDS } from '../src/app.js';
+import { fakeStoreNamespace } from './fake-durable.js';
 
-export function setupApp({ modules = [], env = {} } = {}) {
-  const storage = memoryStorage();
-  const app = createApp({ storage, modules, env: { APP_URL: 'https://rewind.test', ...env } });
+// Durable storage has no in-process `data` map; tests that peek at keys get one built from the
+// keys written through this storage.
+function withMemoryView(storage) {
+  const keys = new Set();
+  return {
+    ...storage,
+    data: { keys: () => keys.values() },
+    put: async (k, v, o) => (keys.add(k), storage.put(k, v, o)),
+    delete: async (k) => (keys.delete(k), storage.delete(k)),
+  };
+}
+
+// REWIND_TEST_STORAGE=durable-sql | durable-kv runs the same tests on Durable Object storage.
+const storageMode = process.env.REWIND_TEST_STORAGE || 'memory';
+
+export function setupApp({ modules = [], env = {}, realtime = null } = {}) {
+  const shards = Object.assign({}, CORE_SHARDS, ...modules.map((m) => m.shards || {}));
+  const storage = storageMode.startsWith('durable')
+    ? withMemoryView(durableStorage(fakeStoreNamespace(storageMode === 'durable-kv' ? 'kv' : 'sql'), { shards }))
+    : memoryStorage();
+  const app = createApp({ storage, modules, realtime, env: { APP_URL: 'https://rewind.test', ...env } });
   const call = async (method, path, body, token) => {
     const res = await app.fetch(
       new Request(`https://rewind.test${path}`, {
@@ -16,7 +36,9 @@ export function setupApp({ modules = [], env = {} } = {}) {
     const data = await res.json().catch(() => null);
     return { status: res.status, data };
   };
-  return { app, storage, call };
+  const ctx = { app, storage, call };
+  setupApp.last = ctx; // lets a test reach the storage of the app it just created
+  return ctx;
 }
 
 // Company "ACME" with an admin (Ana) and a member invited into the default team (Bia).

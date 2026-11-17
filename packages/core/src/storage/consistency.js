@@ -7,6 +7,8 @@
 //    just created...) is read again a few times, briefly, in case the replica is behind.
 //    Keys where "not found" is normal (e.g. "is this email taken?") are not retried.
 
+import { mergePatch } from './merge-patch.js';
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 
@@ -53,6 +55,18 @@ export function readYourWrites(storage, { retryPrefixes = [], delays = [100, 200
     async delete(key) {
       await storage.delete(key);
       remember(key, undefined);
+    },
+
+    async touch(key, field, atLeast) {
+      await storage.touch(key, field, atLeast);
+      recent.delete(key); // the new value is only known by the database
+    },
+
+    async patch(key, fields) {
+      await storage.patch(key, fields);
+      const hit = fresh(key);
+      if (hit && hit.value !== undefined) remember(key, mergePatch(hit.value, fields));
+      else recent.delete(key); // unknown full value here: let the next read go to the store
     },
 
     async list(prefix) {

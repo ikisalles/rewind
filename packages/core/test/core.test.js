@@ -138,30 +138,99 @@ test('social login: company creation, auto-join and group teams', async () => {
     assert.equal(biaMe.org.id, me.org.id);
     const team = biaMe.teams.find((t) => t.name === 'Payments Squad');
     assert.deepEqual(biaMe.user.teamIds, [team.id]);
-    assert.equal((await call('GET', '/api/me', null, first.token)).data.user.onboarding, null);
+    assert.equal((await call('GET', '/api/me', null, first.token)).data.user.onboarding ?? null, null); // cleared
   } finally {
     globalThis.fetch = realFetch;
   }
 });
 
-test('sql storage adapter round trip', async () => {
-  // Fake driver over a Map, emulating the SQL the adapter sends.
-  const rows = new Map();
-  const driver = {
-    async run(sql, p) {
-      if (sql.startsWith('INSERT')) rows.set(p[0], { v: p[1], exp: p[2] });
-      if (sql.startsWith('DELETE')) rows.delete(p[0]);
-    },
-    async all(sql, p) {
-      if (sql.includes('k = ?')) return rows.has(p[0]) ? [rows.get(p[0])] : [];
-      return [...rows.keys()].filter((k) => k >= p[0] && k < p[1]).sort().map((k) => rows.get(k));
-    },
+test('sql storage on real SQLite: values, prefixes, TTL, and runtimes that mangle big integers', async (t) => {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import('node:sqlite'));
+  } catch {
+    return t.skip('node:sqlite is not available in this Node version');
+  }
+  const db = new DatabaseSync(':memory:');
+  const realDriver = {
+    all: async (sql, p) => db.prepare(sql).all(...p),
+    run: async (sql, p) => void db.prepare(sql).run(...p),
   };
-  const s = sqlStorage(driver);
-  await s.put('a:1', { x: 1 });
-  await s.put('a:2', { x: 2 });
-  await s.put('b:1', { x: 3 });
-  assert.deepEqual(await s.list('a:'), [{ x: 1 }, { x: 2 }]);
-  await s.delete('a:1');
-  assert.equal(await s.get('a:1'), null);
+  // what the edge runtime did: integer columns came back wrong (here: wrapped to 32 bits)
+  const manglingDriver = {
+    ...realDriver,
+    all: async (sql, p) => (await realDriver.all(sql, p)).map((r) => ('exp' in r && r.exp !== null ? { ...r, exp: r.exp | 0 } : r)),
+  };
+  for (const [name, driver] of [['sqlite', realDriver], ['mangling runtime', manglingDriver]]) {
+    db.exec('DROP TABLE IF EXISTS rewind_kv');
+    const s = sqlStorage(driver);
+    await s.put('a:1', { x: 1 });
+    await s.put('a:2', { x: 2 }, { ttl: 60 * 60 * 24 * 30 }); // a 30-day session
+    await s.put('b:1', { x: 3 });
+    assert.deepEqual(await s.get('a:2'), { x: 2 }, name);
+    assert.deepEqual(await s.list('a:'), [{ x: 1 }, { x: 2 }], name);
+    await s.put('a:3', { x: 4 }, { ttl: -1 }); // already expired
+    assert.equal(await s.get('a:3'), null, name);
+    assert.deepEqual((await s.list('a:')).map((v) => v.x), [1, 2], name);
+    await s.delete('a:1');
+    assert.equal(await s.get('a:1'), null, name);
+    assert.deepEqual(await s.get('b:1'), { x: 3 }, name);
+    // patch changes only the given fields, inside the database (arrays replace, null removes)
+    await s.put('p:1', { name: 'S', columns: [1, 2], hidden: true, share: 'x' });
+    await s.patch('p:1', { hidden: false, columns: [], share: null });
+    assert.deepEqual(await s.get('p:1'), { name: 'S', columns: [], hidden: false }, name);
+    await s.patch('missing', { a: 1 });
+    assert.equal(await s.get('missing'), null, name);
+    // touch: a revision that only grows
+    await s.touch('p:1', 'rev', 1000);
+    await s.touch('p:1', 'rev', 10); // a clock behind still moves it forward
+    assert.equal((await s.get('p:1')).rev, 1001, name);
+  }
+});
+
+test('team members: add and remove one person, keeping their other teams', async () => {
+  const { call } = setup();
+  const { admin, bia, me } = await bootstrap(call);
+  const squad = (await call('POST', '/api/teams', { name: 'Squad' }, admin)).data.team;
+  const biaId = (await call('GET', '/api/me', null, bia)).data.user.id;
+
+  const added = await call('POST', `/api/teams/${squad.id}/members`, { userId: biaId }, admin);
+  assert.equal(added.status, 201);
+  assert.deepEqual(added.data.member.teamIds.sort(), [me.org.defaultTeamId, squad.id].sort());
+  assert.equal((await call('POST', `/api/teams/${squad.id}/members`, { userId: biaId }, admin)).status, 200); // already in
+
+  const removed = await call('DELETE', `/api/teams/${squad.id}/members/${biaId}`, null, admin);
+  assert.deepEqual(removed.data.member.teamIds, [me.org.defaultTeamId]);
+  assert.equal(removed.data.member.cred, undefined);
+
+  assert.equal((await call('POST', `/api/teams/${squad.id}/members`, { userId: biaId }, bia)).status, 403);
+  assert.equal((await call('POST', `/api/teams/${squad.id}/members`, { userId: 'nobody' }, admin)).status, 404);
+  assert.equal((await call('POST', '/api/teams/nope/members', { userId: biaId }, admin)).status, 404);
+});
+
+test('durable storage: every key lives in its owner object, so every list stays in one object', async () => {
+  const { durableStorage, shardOf } = await import('../src/storage/durable.js');
+  const { fakeStoreNamespace } = await import('./fake-durable.js');
+  const shards = { user: 'org', team: 'org', board: 'org', sprint: 'board', note: 'sprint', vote: 'sprint', action: 'sprint' };
+  const ns = fakeStoreNamespace('kv');
+  const s = durableStorage(ns, { shards });
+  await s.put('user:o1:u1', { id: 'u1' });
+  await s.put('user:o2:u9', { id: 'u9' });
+  await s.put('board:o1:b1', { id: 'b1' });
+  await s.put('sprint:b1:s1', { id: 's1' });
+  await s.put('note:s1:n1', { id: 'n1' });
+  await s.put('note:s1:n2', { id: 'n2' });
+  await s.put('session:t1', { userId: 'u1' }, { ttl: 60 });
+  assert.equal(shardOf('note:s1:n1', shards), 'sprint:s1');
+  assert.equal(shardOf('sprint:b1:s1', shards), 'board:b1');
+  assert.equal(shardOf('session:t1', shards), 'global');
+  assert.deepEqual([...ns.objects.keys()].sort(), ['rewind-store:board:b1', 'rewind-store:global', 'rewind-store:org:o1', 'rewind-store:org:o2', 'rewind-store:sprint:s1']);
+  assert.deepEqual((await s.list('note:s1:')).map((n) => n.id), ['n1', 'n2']);
+  assert.deepEqual((await s.list('user:o1:')).map((u) => u.id), ['u1']);
+  await s.patch('note:s1:n1', { text: 'x' });
+  await s.touch('sprint:b1:s1', 'rev', 5);
+  assert.deepEqual(await s.get('note:s1:n1'), { id: 'n1', text: 'x' });
+  assert.equal((await s.get('sprint:b1:s1')).rev, 5);
+  await s.put('session:old', { userId: 'u1' }, { ttl: -1 });
+  assert.equal(await s.get('session:old'), null);
 });

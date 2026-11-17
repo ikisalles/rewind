@@ -4,6 +4,12 @@
 //   put(key, value, { ttl }?)  (ttl in seconds)
 //   delete(key)
 //   list(prefix) -> value[]   (ordered by key)
+//   patch(key, fields)  changes only those fields of an existing value (JSON Merge Patch);
+//                       does nothing when the key doesn't exist
+//   touch(key, field, atLeast)  sets a numeric field to max(field + 1, atLeast): a revision
+//                       that only grows, even with clocks a little apart between servers
+
+import { mergePatch } from './merge-patch.js';
 
 export function memoryStorage(initial = {}) {
   const data = new Map(Object.entries(initial));
@@ -28,6 +34,16 @@ export function memoryStorage(initial = {}) {
     },
     async delete(key) {
       data.delete(key);
+    },
+    async patch(key, fields) {
+      const entry = data.get(key);
+      if (!entry || !alive(entry)) return;
+      entry.v = mergePatch(entry.v, fields);
+    },
+    async touch(key, field, atLeast) {
+      const entry = data.get(key);
+      if (!entry || !alive(entry)) return;
+      entry.v[field] = Math.max((Number(entry.v[field]) || 0) + 1, atLeast);
     },
     async list(prefix) {
       return [...data.keys()]

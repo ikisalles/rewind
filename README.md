@@ -2,8 +2,8 @@
 
 > **listening to and giving a voice to the team**
 
-Rewind is an open source tool for agile retrospectives. It is designed to run on the edge, on
-**Cloudflare Workers** or **Azion Functions**, and works on any runtime that speaks `fetch`
+Rewind is an open source tool for agile retrospectives. It is designed to run on the edge, primarily on
+**Azion Functions** (also on **Cloudflare Workers**), and works on any runtime that speaks `fetch`
 (Deno, Bun, Node 20+).
 
 - **Modular monorepo**: a small core (companies, people, teams, sign-in) plus feature **modules**. Retro is the first module; new ones plug in without touching the others.
@@ -19,10 +19,12 @@ Rewind is an open source tool for agile retrospectives. It is designed to run on
 | Social sign-in | The first sign-in from a domain creates the company and makes that person the admin. Rewind then asks whether other `@domain` accounts may join automatically. |
 | Automatic teams | Provider groups (Google Workspace, Microsoft Entra ID, GitHub teams) become Rewind teams. Without groups, the person joins the default team. |
 | Invites | For manually created companies, or when automatic sign-in is off, the admin invites people by email and picks their team and role. The link can be copied; the email is sent if Resend is configured. |
+| Teams | Administration → Teams lists the teams; open one to see its members, remove someone or add a person who is already in the company. |
 | Same company name | Registering a company name that already exists (ignoring case, accents and extra spaces) doesn't create a duplicate: the request waits for approval. The person who registered the company gets an email and every admin sees the request in Administration → Members (and on the dashboard). Approved people join as members of the teams the admin picks, so they only see those teams' boards. Denied people get an email and can't register that company again; registering a different company name reactivates their sign-up. |
 | Retro | Boards per team → sprints with start and end dates → configurable columns → sticky notes from each member. |
 | Templates | When creating a sprint, pick a format (Start/Stop/Continue, 4Ls, Mad/Sad/Glad, Sailboat, Starfish, Rose/Thorn/Bud or Classic) or start blank and add the columns yourself. Each column can have a prompt shown in the note box. A template can also be applied later from the board (*Template*). |
 | Hide notes | The retro admin hides or reveals the notes. While they are hidden, the API doesn't send other people's text at all: it is not just a blur on screen. |
+| Live updates | People on the same retro see new cards, votes, merges and the finish within about a second, over a WebSocket: one Durable Object per sprint on Cloudflare (and Azion Durable Objects, same interface), an in-process hub on Node/Docker. Messages only say "this sprint changed", so hidden notes and authors never travel over it. Without it the board refreshes every few seconds. |
 | Votes | The admin sets how many votes each person gets; only the admin sees this setting. People spend them on the cards they want to prioritize, and can put several on the same card (the heart adds one, "−" takes one back) as long as the total stays within the limit. |
 | Merge notes | Drag a card onto another (you're asked to confirm after the drop), or use the merge button and pick several. The card keeps every text and author, all votes add up and action items follow. Everyone can merge their own notes, even while notes are hidden; the retro admin can merge any revealed note. Each merged note can be split back into its own card. |
 | Hide authors | The retro admin hides who wrote each card, for everyone (admin included) and on the public link. The API doesn't send the authors at all; people still see "You" on their own cards. |
@@ -198,19 +200,7 @@ Locally, data is stored in `.data/rewind.json`.
 
 ## Deploy
 
-### Cloudflare (Workers + Static Assets + D1)
-
-```bash
-npm install && npm run build:web             # dist/web: shell + modules
-cp apps/api/cloudflare/wrangler.toml.example wrangler.toml
-npx wrangler d1 create rewind                # copy the database_id into wrangler.toml
-npx wrangler secret put GOOGLE_CLIENT_ID   # and the other secrets
-npx wrangler deploy
-```
-
-The Worker serves `dist/web` and the API on the same domain. The table is created automatically on first access.
-
-### Azion (Application + Function + Object Storage + SQL Database)
+### Azion — primary target (Application + Function + Object Storage + SQL Database)
 
 Everything is described in `azion.config.mjs`:
 
@@ -255,6 +245,42 @@ fails reading `azion/azion.json`). If the account can use the v4 API (`GET /v4/w
 200), set `APIVersion = 'v4'` in `~/.azion/default/settings.toml` before deploying; the CLI checks again after
 24 hours. The lasting fix is to have the account moved to v4.
 
+**Data on Durable Objects (production setup)**: the Azion SQL Database serves reads from replicas
+that were measured ~60 s behind the writes, and reading the main instance through its REST API costs
+~1.7 s per query, too slow and too stale for a live retro. So on Azion the data lives in the
+`RewindStore` Durable Object (`@rewind/core/storage/durable`), strongly consistent, one object per
+owner: a sprint's notes, votes and action items in the sprint's object, a board's sprints in the
+board's object, a company's people, teams, boards, invites and access requests in the company's
+object, sessions and indexes in a global object. Modules declare their rules (`shards` in
+`defineModule`), so every list stays inside one object.
+
+| Variable | Value |
+| --- | --- |
+| `REWIND_STORE` | `durable-object:RewindStore` (the binding) |
+| `REWIND_STORAGE` | `durable` to use it; unset keeps the SQL Database |
+| `MIGRATE_TOKEN` | only while migrating; remove afterwards |
+
+Moving an existing SQL Database over: deploy with `REWIND_STORE` and `MIGRATE_TOKEN` set (data still
+read from SQL), call `POST /api/_migrate` with header `x-migrate-token: <MIGRATE_TOKEN>` (copies every
+row once, keeping the time left on sessions; a second call answers 409 unless `?force=1`), then set
+`REWIND_STORAGE=durable` and deploy again. The SQL Database stays untouched as a backup.
+
+Tests run on every storage: `npm run test:all` (memory, Durable Objects with SQLite, Durable Objects
+with the key-value API).
+
+**Live updates on Azion**: one `RewindRoom` Durable Object per sprint. On Azion a Durable Object
+binding is an environment variable that names the class: `REWIND_ROOMS = durable-object:RewindRoom`
+(in `.env.azion`, sent by `npm run azion:setup`); the function then gets the namespace as
+`env.REWIND_ROOMS`. That is why `apps/api/azion/main.js` uses the ES Modules handler and exports the
+class. Two details of the Azion toolchain it depends on:
+
+- the runtime requires `fetch` to be declared `async` (`export default { async fetch(request, env) {...} }`);
+- the bundler wraps ES Modules entries in a file that re-exports only `default`, which would drop the
+  class, so `build.extend` in `azion.config.mjs` bundles `main.js` itself.
+
+Without the variable the API still works and the board falls back to refreshing every few seconds.
+Runtime logs: `azion logs cells --function-id <id>`.
+
 **Next deploys**: `npm run azion:deploy`. The CLI updates the same resources because their IDs are in
 `azion/azion.json`, so keep that file committed.
 
@@ -267,6 +293,21 @@ by hand (Actions → *Deploy Application using Azion CLI* → Run workflow). Add
 run `npm run azion:setup -- --with-token` to give the function `AZION_TOKEN`: failed writes are then retried
 through the SQL Database REST API, which always writes to the main instance. Set `REWIND_SQL_MODE=api` to send
 every query through the API. Prefer a dedicated personal token with an expiration date for this.
+
+### Cloudflare (Workers + Static Assets + D1)
+
+```bash
+npm install && npm run build:web             # dist/web: shell + modules
+cp apps/api/cloudflare/wrangler.toml.example wrangler.toml
+npx wrangler d1 create rewind                # copy the database_id into wrangler.toml
+npx wrangler secret put GOOGLE_CLIENT_ID   # and the other secrets
+npx wrangler deploy
+```
+
+Live updates use the `RewindRoom` Durable Object (binding `REWIND_ROOMS`, already in the example
+`wrangler.toml`). Leave it out and the retro board falls back to refreshing every few seconds.
+
+The Worker serves `dist/web` and the API on the same domain. The table is created automatically on first access.
 
 ### API on a different domain
 

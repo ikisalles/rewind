@@ -1,4 +1,4 @@
-import { get, post, patch, del } from '@rewind/web/api.js';
+import { get, post, patch, del, session, apiUrl, minRev } from '@rewind/web/api.js';
 import { h, mount, button, field, badge, modal, icon, avatar, fmtDate, attempt, confirmDialog, copyText, pageHeader } from '@rewind/web/ui.js';
 import { applyTheme } from '@rewind/web/theme.js';
 import { logo, footer, APP_NAME, store } from '@rewind/web/app.js';
@@ -16,12 +16,84 @@ const typing = (root) => {
 // id of the card being dragged (drag & drop merge)
 let draggingId = null;
 
-function startPolling(root, refresh) {
-  const timer = setInterval(() => {
-    if (document.hidden || draggingId || typing(root) || document.querySelector('.modal-overlay')) return;
+const LIVE_FALLBACK_MS = 30_000; // safety poll while the live connection is up
+const busy = (root) => document.hidden || draggingId || typing(root) || document.querySelector('.modal-overlay');
+
+let serverConfig;
+const liveAvailable = async () => (serverConfig ??= await get('/api/config').catch(() => ({}))).realtime === true;
+
+// Keeps a sprint up to date: live updates over a WebSocket when the server offers them
+// (Durable Objects / in-process hub), polling otherwise (and as a safety net).
+// Never repaints while someone is typing, dragging a card or has a window open: the
+// update waits until they're done.
+function keepUpdated(root, refresh, liveUrl) {
+  let stopped = false;
+  let pending = false;
+  let lastRefresh = Date.now();
+  let ws = null;
+  let live = false;
+  let retry = 0;
+  let reconnect = null;
+  let ping = null;
+
+  const run = () => {
+    if (busy(root)) return void (pending = true);
+    pending = false;
+    lastRefresh = Date.now();
     refresh().catch(() => {});
-  }, POLL_MS);
-  return () => clearInterval(timer);
+  };
+  // a change happened elsewhere: load until we see at least its revision
+  const changed = (rev) => {
+    if (busy(root)) return void (pending = true);
+    pending = false;
+    lastRefresh = Date.now();
+    refresh(rev).catch(() => {});
+  };
+
+  const timer = setInterval(() => {
+    if (pending) return run();
+    const every = live ? LIVE_FALLBACK_MS : POLL_MS;
+    if (Date.now() - lastRefresh >= every) run();
+  }, 1000);
+
+  const connect = async () => {
+    if (stopped || !liveUrl || !('WebSocket' in window) || !(await liveAvailable())) return;
+    const token = session.get();
+    if (!token) return;
+    const url = new URL(apiUrl(liveUrl), location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(url, ['rewind', token]);
+    ws.onopen = () => {
+      live = true;
+      retry = 0;
+      ping = setInterval(() => ws.readyState === 1 && ws.send('ping'), 25_000);
+      run(); // catch up on anything that changed while connecting
+    };
+    ws.onmessage = (e) => {
+      if (e.data === 'pong') return;
+      let rev = 0;
+      try {
+        rev = Number(JSON.parse(e.data).rev) || 0;
+      } catch {
+        /* older message format */
+      }
+      changed(rev);
+    };
+    ws.onclose = () => {
+      live = false;
+      clearInterval(ping);
+      if (!stopped) reconnect = setTimeout(connect, Math.min(60_000, 1000 * 2 ** retry++));
+    };
+  };
+  connect();
+
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+    clearTimeout(reconnect);
+    clearInterval(ping);
+    ws?.close();
+  };
 }
 
 // ===================================================================== board columns
@@ -185,8 +257,15 @@ function columnsView(state, opts) {
       return h(
         'section',
         { class: 'column', style: { '--col': col.color } },
-        h('header', { class: 'column-head' }, h('span', { class: 'col-dot' }), h('h3', {}, col.title), h('span', { class: 'count' }, String(notes.length))),
-        !opts.readOnly && !finished ? opts.composer(col) : null,
+        h(
+          'header',
+          { class: 'column-head' },
+          h('span', { class: 'col-dot' }),
+          h('h3', {}, col.title),
+          col.orphan ? h('span', { title: "These notes' column was removed. Save the columns (Columns → Save) to keep this one, then rename it." }, badge('Recovered', 'warning')) : null,
+          h('span', { class: 'count' }, String(notes.length)),
+        ),
+        !opts.readOnly && !finished && !col.orphan ? opts.composer(col) : null,
         h('div', { class: 'notes' }, notes.length ? notes.map((n) => noteCard(n, col, state, opts)) : h('p', { class: 'empty-col' }, 'No notes')),
       );
     }),
@@ -238,6 +317,80 @@ function actionRow(action, state, { editable, onChange, origin }) {
   );
 }
 
+// Action items written in a window are drafts until the window is saved.
+// `drafts` is shared by the whole window: [{ key, noteId, text, ownerId, due }].
+function draftEditor(state, noteId, drafts, onChange) {
+  const mine = () => drafts.filter((d) => d.noteId === noteId);
+  const list = h('ul', { class: 'actions drafts' });
+  const draw = () =>
+    mount(
+      list,
+      mine().map((d) =>
+        h(
+          'li',
+          { class: 'action draft' },
+          h('span', { class: 'draft-dot', title: 'Not saved yet' }),
+          h(
+            'div',
+            { class: 'action-main' },
+            h('span', { class: 'action-text' }, d.text),
+            h('span', { class: 'action-meta' }, h('span', {}, icon('user', 12), d.ownerId ? memberName(state, d.ownerId) : 'Unassigned'), d.due ? h('span', {}, fmtDate(d.due)) : null, badge('Not saved yet', 'warning')),
+          ),
+          button('', { iconName: 'x', variant: 'ghost', size: 'xs', title: 'Remove', onClick: () => (drafts.splice(drafts.indexOf(d), 1), draw(), onChange()) }),
+        ),
+      ),
+    );
+  const form = h(
+    'form',
+    {
+      class: 'action-form',
+      onSubmit: (e) => {
+        e.preventDefault();
+        const data = Object.fromEntries(new FormData(form));
+        if (!data.text.trim()) return;
+        drafts.push({ key: Math.random().toString(36).slice(2), noteId, text: data.text.trim(), ownerId: data.ownerId || null, due: data.due || null });
+        form.reset();
+        form.elements.text.focus();
+        draw();
+        onChange();
+      },
+    },
+    h('input', { name: 'text', required: true, maxlength: 500, placeholder: 'New action item...', 'aria-label': 'Action item' }),
+    h('select', { name: 'ownerId', 'aria-label': 'Owner' }, h('option', { value: '' }, 'Owner'), state.members.map((m) => h('option', { value: m.id }, m.name))),
+    h('input', { name: 'due', type: 'date', 'aria-label': 'Due date (optional)', title: 'Due date (optional)' }),
+    button('Add', { type: 'submit', iconName: 'plus', size: 'sm' }),
+  );
+  draw();
+  return h('div', { class: 'stack-sm' }, list, form);
+}
+
+// One of the top voted items, followed by whatever goes under it (action items, editors).
+function resultItem(state, note, i, ...children) {
+  const col = state.sprint.columns.find((c) => c.id === note.columnId);
+  return h(
+    'li',
+    { class: 'result', style: { '--col': col?.color } },
+    h(
+      'div',
+      { class: 'result-head' },
+      h('span', { class: 'result-rank' }, `#${i + 1}`),
+      h(
+        'div',
+        { class: 'result-note' },
+        h('p', {}, note.text),
+        note.merged?.length ? h('ul', { class: 'merged-list' }, note.merged.map((part) => h('li', { class: 'merged-part' }, h('p', { class: 'note-text' }, part.text), h('span', { class: 'merged-meta' }, authorLabel(part))))) : null,
+        h('span', { class: 'muted small' }, `${col?.title || ''} · ${state.sprint.anonymous ? 'Anonymous' : [note, ...(note.merged || [])].map(authorLabel).join(', ')} · `, icon('heart', 11), ` ${note.votes} vote(s)`),
+      ),
+    ),
+    children,
+  );
+}
+
+const toPayload = (drafts) => drafts.map(({ noteId, text, ownerId, due }) => ({ noteId, text, ownerId, due }));
+
+// Same rule the API uses when the retro is finished: most votes, then oldest.
+const topPreview = (state, n = 3) => [...state.notes].sort((a, b) => b.votes - a.votes || a.createdAt.localeCompare(b.createdAt)).slice(0, n);
+
 function actionComposer(state, noteId, onChange) {
   const form = h(
     'form',
@@ -267,13 +420,27 @@ export async function sprintView(root, { params }) {
   let tab = 'board';
   const composers = new Map(); // columnId -> textarea (kept across repaints)
 
-  const load = async () => {
-    state = await get(`/api/sprints/${params.sprintId}`);
-    state.me = store.me.user;
+  // Never show a state older than the one on screen: the sprint's `rev` grows with every
+  // change, and reads may come from a database replica a moment behind. With `want`, keep
+  // trying (briefly) until the server returns at least that revision.
+  const RETRY_MS = [300, 700, 1500, 3000, 5000];
+  const load = async (want = 0) => {
+    want = Math.max(want, minRev(params.sprintId));
+    for (let i = 0; ; i++) {
+      const next = await get(`/api/sprints/${params.sprintId}`);
+      const rev = Number(next.sprint.rev) || 0;
+      const shown = Number(state?.sprint.rev) || 0;
+      if (rev >= shown && rev >= want) {
+        state = next;
+        state.me = store.me.user;
+        return true;
+      }
+      if (i >= RETRY_MS.length || rev < shown && rev >= want) return false; // keep what's on screen
+      await new Promise((r) => setTimeout(r, RETRY_MS[i]));
+    }
   };
-  const refresh = async () => {
-    await load();
-    paint();
+  const refresh = async (want = 0) => {
+    if (await load(want)) paint();
   };
 
   // ---------------------------------------------------- note handlers
@@ -561,12 +728,53 @@ export async function sprintView(root, { params }) {
     });
   };
 
+  // Finish: write the action items first; the retro only closes when they are saved.
   const finishRetro = async () => {
-    if (!(await confirmDialog('Finish the retro? Nobody will be able to create, edit or vote on notes anymore, and all notes will be revealed.', { confirmLabel: 'Finish retro' }))) return;
-    if (await attempt(() => post(`${sprintUrl}/finish`), 'Retro finished')) {
+    if (state.sprint.hidden) {
+      const ok = await confirmDialog('To pick action items you need to read the notes. Reveal them to everyone now? (Finishing the retro reveals them anyway.)', { confirmLabel: 'Reveal notes' });
+      if (!ok || !(await attempt(() => patch(sprintUrl, { hidden: false })))) return;
       await refresh();
-      resultsDialog();
     }
+    const drafts = [];
+    let saving = false;
+    const saveBtn = button('Save and finish retro', {
+      variant: 'primary',
+      iconName: 'flag',
+      onClick: async () => {
+        if (saving) return;
+        saving = true;
+        saveBtn.disabled = true;
+        const r = await attempt(() => post(`${sprintUrl}/finish`, { actions: toPayload(drafts) }), drafts.length ? `Retro finished with ${drafts.length} action item${drafts.length === 1 ? '' : 's'}` : 'Retro finished');
+        saving = false;
+        saveBtn.disabled = false;
+        if (r) {
+          drafts.length = 0;
+          m.close();
+          await refresh();
+          resultsDialog();
+        }
+      },
+    });
+    const top = topPreview(state);
+    const body = h(
+      'div',
+      { class: 'stack' },
+      h('p', { class: 'muted small' }, 'These are the most voted items right now. Write the action items for them, then save: only then the retro is finished (notes, votes and edits lock) and the action items are created. Cancel keeps the retro open and discards what you wrote here.'),
+      top.length
+        ? h('ol', { class: 'results' }, top.map((note, i) => resultItem(state, note, i, draftEditor(state, note.id, drafts, () => {}))))
+        : h('p', { class: 'muted' }, 'No notes in this retro.'),
+    );
+    const m = modal({
+      title: 'Finish retro — action items',
+      wide: true,
+      body,
+      actions: [button('Cancel', { onClick: () => close() }), saveBtn],
+    });
+    // closing with unsaved drafts asks first
+    const close = async () => {
+      if (drafts.length && !(await confirmDialog(`Discard ${drafts.length} unsaved action item${drafts.length === 1 ? '' : 's'}? The retro stays open.`, { danger: true, confirmLabel: 'Discard' }))) return;
+      m.close();
+    };
   };
 
   const reopen = async () => {
@@ -574,7 +782,23 @@ export async function sprintView(root, { params }) {
   };
 
   // The "Finalizar retro" window: top 3 voted items, each with its action items.
+  // After finishing: the top 3 with their action items. New ones are drafts until saved.
   const resultsDialog = () => {
+    const drafts = [];
+    const saveBtn = button('Save action items', {
+      variant: 'primary',
+      disabled: true,
+      onClick: async () => {
+        if (!drafts.length) return;
+        saveBtn.disabled = true;
+        const r = await attempt(() => post(`${sprintUrl}/actions`, { actions: toPayload(drafts) }), `${drafts.length} action item${drafts.length === 1 ? '' : 's'} saved`);
+        if (r) {
+          drafts.length = 0;
+          await redraw();
+        } else saveBtn.disabled = false;
+      },
+    });
+    const sync = () => (saveBtn.disabled = !drafts.length);
     const body = () => {
       const top = state.sprint.top.map((id) => state.notes.find((n) => n.id === id)).filter(Boolean);
       if (!top.length) return h('p', { class: 'muted' }, 'No notes in this retro.');
@@ -582,25 +806,13 @@ export async function sprintView(root, { params }) {
         'ol',
         { class: 'results' },
         top.map((note, i) => {
-          const col = state.sprint.columns.find((c) => c.id === note.columnId);
           const actions = state.actions.filter((a) => a.noteId === note.id);
-          return h(
-            'li',
-            { class: 'result', style: { '--col': col?.color } },
-            h(
-              'div',
-              { class: 'result-head' },
-              h('span', { class: 'result-rank' }, `#${i + 1}`),
-              h(
-                'div',
-                { class: 'result-note' },
-                h('p', {}, note.text),
-                note.merged?.length ? h('ul', { class: 'merged-list' }, note.merged.map((part) => h('li', { class: 'merged-part' }, h('p', { class: 'note-text' }, part.text), h('span', { class: 'merged-meta' }, authorLabel(part))))) : null,
-                h('span', { class: 'muted small' }, `${col?.title || ''} · ${state.sprint.anonymous ? 'Anonymous' : [note, ...(note.merged || [])].map(authorLabel).join(', ')} · `, icon('heart', 11), ` ${note.votes} vote(s)`),
-              ),
-            ),
+          return resultItem(
+            state,
+            note,
+            i,
             h('ul', { class: 'actions' }, actions.map((a) => actionRow(a, state, { editable: state.canManage, onChange: redraw }))),
-            state.canManage ? actionComposer(state, note.id, redraw) : !actions.length ? h('p', { class: 'muted small' }, 'No action items.') : null,
+            state.canManage ? draftEditor(state, note.id, drafts, sync) : !actions.length ? h('p', { class: 'muted small' }, 'No action items.') : null,
           );
         }),
       );
@@ -608,10 +820,22 @@ export async function sprintView(root, { params }) {
     const redraw = async () => {
       await load();
       m.setBody(body());
+      sync();
       paint();
     };
-    const m = modal({ title: 'Retro results — top 3 voted items', wide: true, body: body(), onClose: () => paint() });
+    const close = async () => {
+      if (drafts.length && !(await confirmDialog(`Discard ${drafts.length} unsaved action item${drafts.length === 1 ? '' : 's'}?`, { danger: true, confirmLabel: 'Discard' }))) return;
+      m.close();
+    };
+    const m = modal({
+      title: 'Retro results — top 3 voted items',
+      wide: true,
+      body: body(),
+      onClose: () => paint(),
+      actions: state.canManage ? [button('Close', { onClick: () => close() }), saveBtn] : [],
+    });
   };
+
 
   // ---------------------------------------------------- pending items from previous sprint
   const reviewPending = async (action, decision) => {
@@ -737,7 +961,7 @@ export async function sprintView(root, { params }) {
 
   await load();
   paint();
-  return startPolling(root, refresh);
+  return keepUpdated(root, refresh, `/api/sprints/${params.sprintId}/live`);
 }
 
 // ===================================================================== public read-only
@@ -790,7 +1014,7 @@ export async function publicSprintView(root, { params }) {
   }
   document.title = `${state.sprint.name} — ${APP_NAME}`;
   paint();
-  return startPolling(root, async () => {
+  return keepUpdated(root, async () => {
     await load();
     paint();
   });

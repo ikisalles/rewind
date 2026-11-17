@@ -14,6 +14,8 @@ function laggyStorage(lagMs) {
     list: (p) => replica.list(p),
     put: async (k, v, o) => (await main.put(k, v, o), later(() => replica.put(k, v, o))),
     delete: async (k) => (await main.delete(k), later(() => replica.delete(k))),
+    // writes go to the main instance; the replica catches up later
+    patch: async (k, f) => (await main.patch(k, f), later(async () => { const v = await main.get(k); if (v) await replica.put(k, v); })),
   };
 }
 

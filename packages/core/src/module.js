@@ -7,6 +7,8 @@
 //     required: true,                    // can't be turned off by a company (default false)
 //     keyPrefixes: ['board:'],           // storage keys that should exist when looked up by id/token;
 //                                        //   on eventually consistent stores a miss is read again
+//     shards: { note: 'sprint' },        // on Durable Object storage, which object owns each key kind:
+//                                        //   "note:<sprintId>:<id>" lives in the object "sprint:<sprintId>"
 //     register(core) {                    // called once when the app starts
 //       core.route('GET', '/api/boards', handler);
 //       return {
@@ -26,5 +28,5 @@
 export function defineModule(mod) {
   if (!mod?.id || !/^[a-z][a-z0-9-]*$/.test(mod.id)) throw new Error('A module needs an id like "retro"');
   if (typeof mod.register !== 'function') throw new Error(`Module ${mod.id} needs a register(core) function`);
-  return Object.freeze({ name: mod.id, description: '', required: false, keyPrefixes: [], ...mod });
+  return Object.freeze({ name: mod.id, description: '', required: false, keyPrefixes: [], shards: {}, ...mod });
 }

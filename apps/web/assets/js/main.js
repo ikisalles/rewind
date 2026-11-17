@@ -24,6 +24,7 @@ const routes = [
   ['/home', homeView],
   ['/admin', adminView],
   ['/admin/:tab', adminView],
+  ['/admin/teams/:teamId', adminView],
   ...MODULES.flatMap((m) => m.routes),
 ];
 const aliases = MODULES.flatMap((m) => m.aliases || []);

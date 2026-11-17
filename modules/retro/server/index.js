@@ -40,8 +40,42 @@ export default defineModule({
   required: true,
   // looked up by an id from the URL or a share token: they should exist
   keyPrefixes: ['board:', 'sprint:', 'sprintref:', 'note:', 'action:', 'share:'],
+  // Durable Object storage: a sprint's notes, votes and action items live in the sprint's object,
+  // a board's sprints in the board's object, a company's boards in the company's object
+  shards: { note: 'sprint', vote: 'sprint', action: 'sprint', sprint: 'board', board: 'org' },
   register(core) {
-    const { db, route, isAdmin, appUrl, teamMembers, getOrg, getTeam, listUsers } = core;
+    const { db, isAdmin, appUrl, teamMembers, getOrg, getTeam, listUsers, realtime } = core;
+
+    // Live updates: every successful change to a sprint (notes, votes, merge, columns, action
+    // items, finish...) tells the people looking at it. The message carries no content, only
+    // "it changed": each browser reloads through the API, so hidden notes stay hidden.
+    const sprintChannel = (id) => `sprint:${id}`;
+    async function touchSprint(sprintId) {
+      const ref = await db.get(K.sprintRef(sprintId));
+      if (!ref) return null; // deleted
+      const rev = Date.now();
+      await db.touch(K.sprint(ref.boardId, sprintId), 'rev', rev);
+      return rev;
+    }
+    const route = (method, path, fn, opts) =>
+      core.route(
+        method,
+        path,
+        method === 'GET' || !path.startsWith('/api/sprints/:id')
+          ? fn
+          : async (c) => {
+              const res = await fn(c);
+              if (res.status < 400) {
+                // the sprint's revision grows with every change: browsers use it to never show a
+                // state older than the one on screen (reads may lag a moment behind the writes)
+                const rev = await touchSprint(c.params.id);
+                await realtime.publish(sprintChannel(c.params.id), { type: 'changed', rev });
+                if (rev) res.headers.set('x-rewind-rev', `${c.params.id}:${rev}`);
+              }
+              return res;
+            },
+        opts,
+      );
 
     async function loadBoard(c, boardId) {
       const board = await db.get(K.board(c.org.id, boardId));
@@ -113,6 +147,14 @@ export default defineModule({
       }));
 
       const { shareToken, ...publicSprint } = sprint;
+      // Notes whose column is gone stay visible: they get an "Unsorted" column (saving the
+      // columns makes it a real one). Nothing written is ever hidden by a missing column.
+      const known = new Set(sprint.columns.map((col) => col.id));
+      const orphans = [...new Set(notes.map((n) => n.columnId).filter((id) => !known.has(id)))];
+      publicSprint.columns = [
+        ...sprint.columns,
+        ...orphans.map((id) => ({ id, title: 'Unsorted', color: '#9ca3af', hint: 'Notes whose column was removed', orphan: true })),
+      ];
       const result = {
         board: { id: board.id, name: board.name, teamId: board.teamId },
         sprint: {
@@ -208,7 +250,7 @@ export default defineModule({
       const board = await loadBoard(c, c.params.id);
       requireManage(isAdmin(c) || board.createdBy === c.user.id);
       board.name = str(c.body.name, 80) || board.name;
-      await db.put(K.board(c.org.id, board.id), board);
+      await db.patch(K.board(c.org.id, board.id), { name: board.name });
       return json({ board });
     });
 
@@ -276,6 +318,12 @@ export default defineModule({
       return json({ sprint }, 201);
     });
 
+    // WebSocket for live updates of one sprint (anyone who can see the sprint)
+    route('GET', '/api/sprints/:id/live', async (c) => {
+      const { sprint } = await loadSprint(c, c.params.id);
+      return realtime.connect(c.req, sprintChannel(sprint.id));
+    });
+
     route('GET', '/api/sprints/:id', async (c) => {
       const { board, sprint, canManage } = await loadSprint(c, c.params.id);
       const members = await teamMembers(c.org.id, board.teamId);
@@ -286,24 +334,28 @@ export default defineModule({
       const { board, sprint, canManage } = await loadSprint(c, c.params.id);
       requireManage(canManage);
       const b = c.body;
-      if (b.name !== undefined) sprint.name = str(b.name, 80) || sprint.name;
-      if (b.start !== undefined && isDate(b.start)) sprint.start = b.start;
-      if (b.end !== undefined && isDate(b.end)) sprint.end = b.end;
+      // Only the fields this request changes are written (see db.patch): the sprint we read may
+      // come from a replica a moment behind, and writing it back whole could undo other changes.
+      const changes = {};
+      const set = (field, value) => ((sprint[field] = value), (changes[field] = value));
+      if (b.name !== undefined) set('name', str(b.name, 80) || sprint.name);
+      if (b.start !== undefined && isDate(b.start)) set('start', b.start);
+      if (b.end !== undefined && isDate(b.end)) set('end', b.end);
       if (sprint.end < sprint.start) fail(400, 'The end date must be after the start date');
-      if (b.hidden !== undefined) sprint.hidden = Boolean(b.hidden);
-      if (b.anonymous !== undefined) sprint.anonymous = Boolean(b.anonymous);
+      if (b.hidden !== undefined) set('hidden', Boolean(b.hidden));
+      if (b.anonymous !== undefined) set('anonymous', Boolean(b.anonymous));
       if (b.votesPerUser !== undefined) {
         const n = Number(b.votesPerUser);
         if (!Number.isInteger(n) || n < 0 || n > 50) fail(400, 'Votes must be between 0 and 50');
-        sprint.votesPerUser = n;
+        set('votesPerUser', n);
       }
       if (b.columns !== undefined || b.template !== undefined) {
         requireOpen(sprint);
         const columns = b.template ? (findTemplate(b.template) || fail(400, 'Unknown template')).columns.map((col) => ({ ...col })) : cleanColumns(b.columns);
         const notes = await db.list(K.notes(sprint.id));
         if (!columns.length && notes.length) fail(400, 'Keep at least one column: this retro already has notes');
-        sprint.columns = columns;
-        if (b.template) sprint.template = b.template;
+        set('columns', columns);
+        if (b.template) set('template', b.template);
         // notes of removed columns go to the first column, nothing is lost
         const ids = new Set(sprint.columns.map((col) => col.id));
         for (const note of notes) {
@@ -313,7 +365,7 @@ export default defineModule({
           }
         }
       }
-      await db.put(K.sprint(board.id, sprint.id), sprint);
+      if (Object.keys(changes).length) await db.patch(K.sprint(board.id, sprint.id), changes);
       return json({ ok: true });
     });
 
@@ -338,35 +390,39 @@ export default defineModule({
       if (c.body.enabled === false) {
         if (sprint.shareToken) await db.delete(K.share(sprint.shareToken));
         sprint.shareToken = null;
+        await db.patch(K.sprint(board.id, sprint.id), { shareToken: null });
       } else if (!sprint.shareToken) {
         sprint.shareToken = randomToken(18);
         await db.put(K.share(sprint.shareToken), { orgId: c.org.id, boardId: board.id, sprintId: sprint.id });
+        await db.patch(K.sprint(board.id, sprint.id), { shareToken: sprint.shareToken });
       }
-      await db.put(K.sprint(board.id, sprint.id), sprint);
       return json({
         shareToken: sprint.shareToken,
         url: sprint.shareToken ? `${appUrl(c.req)}/#/s/${sprint.shareToken}` : null,
       });
     });
 
+    // Finishing saves the action items written in the finish window, all or nothing:
+    // every item is validated first, then the sprint is closed and the items are created.
     route('POST', '/api/sprints/:id/finish', async (c) => {
       const { board, sprint, canManage } = await loadSprint(c, c.params.id);
       requireManage(canManage);
+      requireOpen(sprint);
       const [notes, votes] = await Promise.all([db.list(K.notes(sprint.id)), db.list(K.votes(sprint.id))]);
+      const actions = await buildActions(c, board, sprint, c.body.actions ?? [], notes);
       sprint.status = 'finished';
       sprint.hidden = false; // results are visible to everyone once the retro is over
       sprint.finishedAt = now();
       sprint.top = topNotes(notes, votes);
-      await db.put(K.sprint(board.id, sprint.id), sprint);
-      return json({ top: sprint.top });
+      await db.patch(K.sprint(board.id, sprint.id), { status: sprint.status, hidden: false, finishedAt: sprint.finishedAt, top: sprint.top });
+      for (const a of actions) await db.put(K.action(sprint.id, a.id), a);
+      return json({ top: sprint.top, actions });
     });
 
     route('POST', '/api/sprints/:id/reopen', async (c) => {
       const { board, sprint, canManage } = await loadSprint(c, c.params.id);
       requireManage(canManage);
-      sprint.status = 'open';
-      sprint.finishedAt = null;
-      await db.put(K.sprint(board.id, sprint.id), sprint);
+      await db.patch(K.sprint(board.id, sprint.id), { status: 'open', finishedAt: null });
       return json({ ok: true });
     });
 
@@ -501,23 +557,30 @@ export default defineModule({
       return members.some((m) => m.id === ownerId) ? ownerId : fail(400, 'Invalid owner');
     }
 
+    // Validates a list of action items (all of them, before anything is written).
+    async function buildActions(c, board, sprint, list, notes) {
+      if (!Array.isArray(list)) fail(400, 'Invalid action items');
+      if (list.length > 50) fail(400, 'Too many action items at once');
+      const noteIds = new Set((notes ?? (await db.list(K.notes(sprint.id)))).map((n) => n.id));
+      const members = new Set((await teamMembers(c.org.id, board.teamId)).map((m) => m.id));
+      return list.map((item, i) => {
+        const text = str(item?.text, 500) || fail(400, `Describe action item ${i + 1}`);
+        const noteId = item.noteId || null;
+        if (noteId && !noteIds.has(noteId)) fail(400, `Action item ${i + 1} refers to a note that no longer exists`);
+        const ownerId = item.ownerId || null;
+        if (ownerId && !members.has(ownerId)) fail(400, `Invalid owner for action item ${i + 1}`);
+        return { id: newId(), sprintId: sprint.id, noteId, text, ownerId, due: isDate(item.due) ? item.due : null, done: false, status: 'open', carriedFrom: null, createdAt: now() };
+      });
+    }
+
+    // One action item ({ text, noteId, ownerId, due }) or several at once ({ actions: [...] }).
     route('POST', '/api/sprints/:id/actions', async (c) => {
       const { board, sprint, canManage } = await loadSprint(c, c.params.id);
       requireManage(canManage);
-      const action = {
-        id: newId(),
-        sprintId: sprint.id,
-        noteId: c.body.noteId || null,
-        text: str(c.body.text, 500) || fail(400, 'Describe the action item'),
-        ownerId: await validOwner(c, board, c.body.ownerId),
-        due: isDate(c.body.due) ? c.body.due : null,
-        done: false,
-        status: 'open',
-        carriedFrom: null,
-        createdAt: now(),
-      };
-      await db.put(K.action(sprint.id, action.id), action);
-      return json({ action }, 201);
+      const batch = Array.isArray(c.body.actions);
+      const actions = await buildActions(c, board, sprint, batch ? c.body.actions : [c.body]);
+      for (const a of actions) await db.put(K.action(sprint.id, a.id), a);
+      return json(batch ? { actions } : { action: actions[0] }, 201);
     });
 
     route('PATCH', '/api/sprints/:id/actions/:actionId', async (c) => {

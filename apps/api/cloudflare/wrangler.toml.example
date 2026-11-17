@@ -19,6 +19,16 @@ database_id = "<your-d1-database-id>"
 # binding = "REWIND_KV"
 # id = "<your-kv-namespace-id>"
 
+# Live updates: one Durable Object per sprint relays changes to connected browsers (WebSockets).
+# Without it Rewind still works and the retro board refreshes every few seconds.
+[[durable_objects.bindings]]
+name = "REWIND_ROOMS"
+class_name = "RewindRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RewindRoom"]
+
 [vars]
 # APP_URL = "https://rewind.example.com"
 # ALLOW_SIGNUP = "true"
