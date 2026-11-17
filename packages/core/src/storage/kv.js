@@ -3,6 +3,8 @@
 // Note: Cloudflare KV is eventually consistent; prefer D1/SQL when several people
 // write to the same retro at the same time.
 
+import { mergePatch } from './merge-patch.js';
+
 export function kvStorage(ns) {
   return {
     async get(key) {
@@ -14,6 +16,15 @@ export function kvStorage(ns) {
     },
     async delete(key) {
       await ns.delete(key);
+    },
+    // KV has no partial update: read, merge, write (not atomic; KV is eventually consistent anyway)
+    async patch(key, fields) {
+      const current = await ns.get(key, 'json');
+      if (current) await ns.put(key, JSON.stringify(mergePatch(current, fields)));
+    },
+    async touch(key, field, atLeast) {
+      const current = await ns.get(key, 'json');
+      if (current) await ns.put(key, JSON.stringify({ ...current, [field]: Math.max((Number(current[field]) || 0) + 1, atLeast) }));
     },
     async list(prefix) {
       const keys = [];

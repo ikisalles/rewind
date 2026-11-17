@@ -5,12 +5,16 @@
 // dependency in apps/api/package.json, import it below and add it to MODULES.
 // Its web part is registered in apps/web/assets/js/modules.js.
 
-import { createApp } from '@rewind/core';
+import { createApp, CORE_SHARDS } from '@rewind/core';
 import retro from '@rewind/retro/server';
 
 export const MODULES = [retro];
 
+// Which Durable Object owns each key kind (core + modules), for durableStorage().
+export const SHARDS = Object.assign({}, CORE_SHARDS, ...MODULES.map((m) => m.shards));
+
 // consistency: 'eventual' for stores whose reads may lag behind writes (Azion SQL read replicas).
-export function createRewind({ storage, env = {}, consistency }) {
-  return createApp({ storage, env, modules: MODULES, consistency });
+// realtime: live updates (Durable Objects on Cloudflare/Azion, in-memory on Node); optional.
+export function createRewind({ storage, env = {}, consistency, realtime }) {
+  return createApp({ storage, env, modules: MODULES, consistency, realtime });
 }

@@ -16,6 +16,9 @@ import { readYourWrites } from './storage/consistency.js';
 
 // Core keys that should exist when looked up (a token someone holds, an id from a link...):
 // on an eventually consistent store, a miss on them is read again before giving up.
+// On Durable Object storage: company data lives in the company's object (keys "<kind>:<orgId>:...").
+export const CORE_SHARDS = { user: 'org', team: 'org', inviteidx: 'org', joinreq: 'org' };
+
 const CORE_KEY_PREFIXES = ['session:', 'authcode:', 'oauth:', 'user:', 'org:', 'cred:', 'team:', 'invite:'];
 
 const SESSION_TTL = 60 * 60 * 24 * 30; // 30 days
@@ -25,7 +28,9 @@ const THEME_KEYS = ['bg', 'surface', 'surface2', 'border', 'text', 'muted', 'acc
 
 // consistency: 'strong' (default) or 'eventual' for stores whose reads may lag behind writes
 // (e.g. Azion SQL Database read replicas): turns on read-your-writes, see storage/consistency.js.
-export function createApp({ storage, env = {}, modules = [], consistency = 'strong' }) {
+// realtime: optional { publish(channel, message), connect(request, channel) } (see realtime/);
+// without it, modules' live endpoints answer 501 and the web app keeps polling.
+export function createApp({ storage, env = {}, modules = [], consistency = 'strong', realtime = null }) {
   const db =
     consistency === 'eventual'
       ? readYourWrites(storage, { retryPrefixes: [...CORE_KEY_PREFIXES, ...modules.flatMap((m) => m.keyPrefixes || [])] })
@@ -67,7 +72,9 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
 
   async function authenticate(req) {
     const header = req.headers.get('authorization') || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    // Browsers can't set headers on a WebSocket: the token comes as a subprotocol ("rewind, <token>").
+    const wsToken = (req.headers.get('sec-websocket-protocol') || '').split(',').map((p) => p.trim()).find((p, i, all) => i > 0 && all[0] === 'rewind');
+    const token = header.startsWith('Bearer ') ? header.slice(7) : wsToken || null;
     if (!token) return null;
     const s = await db.get(K.session(token));
     if (!s) return null;
@@ -220,6 +227,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     json({
       providers: enabledProviders(env),
       allowSignup: env.ALLOW_SIGNUP !== 'false',
+      realtime: Boolean(realtime),
     }),
   { public: true });
 
@@ -276,7 +284,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     const org = await createOrg({ name: orgName, createdBy: null });
     const user = await createUser(org, { email, name, role: 'admin', teamIds: [org.defaultTeamId] });
     org.createdBy = user.id;
-    await db.put(K.org(org.id), org);
+    await db.patch(K.org(org.id), { createdBy: user.id });
     await db.put(K.cred(user.id), { hash: await hashPassword(password) });
     return json({ token: await createSession(user) }, 201);
   }, { public: true });
@@ -361,7 +369,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
       const groupTeams = await teamsForGroups(org, profile.groups);
       existing.teamIds = [...new Set([...existing.teamIds, ...groupTeams])];
       linkProvider(existing);
-      await db.put(K.user(org.id, existing.id), existing);
+      await db.patch(K.user(org.id, existing.id), { teamIds: existing.teamIds, providers: existing.providers, avatar: existing.avatar });
       return existing;
     }
 
@@ -432,7 +440,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
       teamIds: [org.defaultTeamId, ...groupTeams],
     });
     org.createdBy = user.id;
-    await db.put(K.org(org.id), org);
+    await db.patch(K.org(org.id), { createdBy: user.id });
     linkProvider(user);
     // Ask the creator whether colleagues from the same domain may join automatically.
     if (companyDomain) user.onboarding = 'autoJoin';
@@ -537,8 +545,10 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
 
   route('PATCH', '/api/me', async (c) => {
     const name = str(c.body.name, 80);
-    if (name) c.user.name = name;
-    await db.put(K.user(c.org.id, c.user.id), c.user);
+    if (name) {
+      c.user.name = name;
+      await db.patch(K.user(c.org.id, c.user.id), { name });
+    }
     return json({ user: c.user });
   });
 
@@ -546,6 +556,8 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
   route('PATCH', '/api/org', async (c) => {
     requireAdmin(c);
     const { body, org } = c;
+    // only the fields sent are written (db.patch), never the whole company record
+    const changes = {};
     if (body.name !== undefined) {
       const name = str(body.name, 80);
       if (name && normalizeOrgName(name) !== normalizeOrgName(org.name)) {
@@ -555,21 +567,24 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
         if ((await db.get(oldKey))?.orgId === org.id) await db.delete(oldKey);
         await db.put(K.orgName(normalizeOrgName(name)), { orgId: org.id });
       }
-      if (name) org.name = name;
+      if (name) org.name = changes.name = name;
     }
     if (body.autoJoin !== undefined) {
       if (body.autoJoin && !org.domain) fail(400, 'Automatic sign-in requires a verified domain (social sign-in)');
-      org.autoJoin = Boolean(body.autoJoin);
+      org.autoJoin = changes.autoJoin = Boolean(body.autoJoin);
     }
     if (body.theme !== undefined) {
       const theme = {};
       for (const k of THEME_KEYS) if (isColor(body.theme?.[k])) theme[k] = body.theme[k].toLowerCase();
       org.theme = theme;
+      // the whole theme is replaced: clear the old object first, then set the new one
+      await db.patch(K.org(org.id), { theme: null });
+      changes.theme = theme;
     }
-    await db.put(K.org(org.id), org);
+    if (Object.keys(changes).length) await db.patch(K.org(org.id), changes);
     if (c.user.onboarding === 'autoJoin' && body.autoJoin !== undefined) {
       c.user.onboarding = null;
-      await db.put(K.user(org.id, c.user.id), c.user);
+      await db.patch(K.user(org.id, c.user.id), { onboarding: null });
     }
     return json({ org });
   });
@@ -583,18 +598,19 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     requireAdmin(c);
     const target = await db.get(K.user(c.org.id, c.params.id));
     if (!target) fail(404, 'Member not found');
+    const changes = {};
     if (c.body.role && ['admin', 'member'].includes(c.body.role)) {
       if (target.role === 'admin' && c.body.role === 'member') {
         const admins = (await db.list(K.users(c.org.id))).filter((u) => u.role === 'admin');
         if (admins.length <= 1) fail(400, 'The company needs at least one admin');
       }
-      target.role = c.body.role;
+      target.role = changes.role = c.body.role;
     }
     if (Array.isArray(c.body.teamIds)) {
       const teams = new Set((await db.list(K.teams(c.org.id))).map((t) => t.id));
-      target.teamIds = [...new Set(c.body.teamIds.filter((id) => teams.has(id)))];
+      target.teamIds = changes.teamIds = [...new Set(c.body.teamIds.filter((id) => teams.has(id)))];
     }
-    await db.put(K.user(c.org.id, target.id), target);
+    if (Object.keys(changes).length) await db.patch(K.user(c.org.id, target.id), changes);
     return json({ member: target });
   });
 
@@ -627,6 +643,24 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     await db.put(K.team(c.org.id, team.id), team);
     return json({ team });
   });
+
+  // Team members: add or remove one person at a time (their other teams are kept).
+  const publicMember = ({ id, name, email, avatar, role, teamIds, providers }) => ({ id, name, email, avatar, role, teamIds, providers });
+
+  async function changeTeamMembership(c, add) {
+    requireAdmin(c);
+    const team = (await db.get(K.team(c.org.id, c.params.id))) || fail(404, 'Team not found');
+    const userId = add ? c.body.userId : c.params.userId;
+    const user = (await db.get(K.user(c.org.id, userId))) || fail(404, 'Member not found');
+    const has = user.teamIds.includes(team.id);
+    if (add && !has) user.teamIds = [...user.teamIds, team.id];
+    if (!add && has) user.teamIds = user.teamIds.filter((id) => id !== team.id);
+    if (add !== has) await db.patch(K.user(c.org.id, user.id), { teamIds: user.teamIds });
+    return json({ member: publicMember(user) }, add && !has ? 201 : 200);
+  }
+
+  route('POST', '/api/teams/:id/members', (c) => changeTeamMembership(c, true));
+  route('DELETE', '/api/teams/:id/members/:userId', (c) => changeTeamMembership(c, false));
 
   route('DELETE', '/api/teams/:id', async (c) => {
     requireAdmin(c);
@@ -687,6 +721,23 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     appUrl,
     apiUrl,
     sendEmail,
+    // live updates: publish after a change, connect a browser's WebSocket to a channel
+    realtime: Object.freeze({
+      enabled: Boolean(realtime),
+      async publish(channel, message) {
+        if (!realtime) return;
+        try {
+          await realtime.publish(channel, message);
+        } catch (e) {
+          console.error('realtime publish failed', e); // never fail the request that changed the data
+        }
+      },
+      connect(req, channel) {
+        if ((req.headers.get('upgrade') || '').toLowerCase() !== 'websocket') fail(426, 'Expected a WebSocket upgrade');
+        if (!realtime) fail(501, 'Real-time updates are not available on this server');
+        return realtime.connect(req, channel);
+      },
+    }),
     getOrg: (orgId) => db.get(K.org(orgId)),
     getTeam: (orgId, teamId) => db.get(K.team(orgId, teamId)),
     listTeams: (orgId) => db.list(K.teams(orgId)),
@@ -770,6 +821,8 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
         res = json({ error: 'Internal error' }, 500);
       }
     }
+    // a WebSocket handed over by a Durable Object goes back untouched (its headers are immutable)
+    if (res.status === 101 || res.webSocket) return res;
     for (const [k, v] of Object.entries(cors)) res.headers.set(k, v);
     res.headers.set('cache-control', 'no-store');
     return res;

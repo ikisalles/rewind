@@ -15,7 +15,9 @@
     "build:web": "node scripts/build-web.mjs",
     "azion:setup": "node scripts/azion-setup.mjs",
     "azion:build": "npm run build:web && azion build",
-    "azion:deploy": "npm run build:web && azion deploy --local"
+    "azion:deploy": "npm run build:web && azion deploy --local",
+    "test:durable": "REWIND_TEST_STORAGE=durable-sql node --test \"apps/api/test/*.test.js\" \"modules/*/test/*.test.js\" \"packages/*/test/*.test.js\" && REWIND_TEST_STORAGE=durable-kv node --test \"apps/api/test/*.test.js\" \"modules/*/test/*.test.js\" \"packages/*/test/*.test.js\"",
+    "test:all": "npm test && npm run test:durable"
   },
   "repository": {
     "type": "git",

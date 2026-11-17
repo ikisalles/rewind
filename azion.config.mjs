@@ -42,8 +42,18 @@ export default {
     bundler: 'esbuild',
     preset: 'javascript',
     polyfills: false,
-    // main.js registers its own `addEventListener('fetch', ...)`
-    worker: true
+    // main.js uses the ES Modules handler (export default { fetch(request, env, ctx) }), which
+    // receives the Durable Object binding in env, and exports the RewindRoom class
+    worker: false,
+    // The bundler wraps an ES Modules entry in a file that re-exports only `default`, which would
+    // drop `export class RewindRoom` (the Durable Object behind live updates). Bundle main.js
+    // itself instead, so the function keeps both the handler and the class.
+    extend: (config) => {
+      const entry = `${process.cwd()}/apps/api/azion/main.js`
+      const points = config.entryPoints
+      config.entryPoints = Array.isArray(points) ? points.map(() => entry) : Object.fromEntries(Object.keys(points).map((out) => [out, entry]))
+      return config
+    }
   },
 
   // dist/web is assembled by `npm run build:web` (the azion:build / azion:deploy scripts run it first).

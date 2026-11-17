@@ -32,6 +32,10 @@ let memoryToken = null;
 // When the session was created in this tab: on stores whose reads lag behind writes, the
 // first requests after signing in may not find the new session yet (see api() below).
 let startedAt = 0;
+// Latest revision this tab caused per record (sprint id -> rev): reads may lag a moment behind
+// writes, so a view can wait until it sees at least that version.
+const revs = new Map();
+export const minRev = (id) => revs.get(id) || 0;
 const FRESH_SESSION_MS = 15_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -51,6 +55,12 @@ export async function api(method, path, body, attempt = 0) {
     throw new Error('Cannot reach the server');
   }
   const data = await res.json().catch(() => ({}));
+  // "<id>:<rev>": the revision a change produced (e.g. of a sprint), see minRev()
+  const rev = res.headers.get('x-rewind-rev');
+  if (rev) {
+    const [id, n] = rev.split(':');
+    revs.set(id, Math.max(revs.get(id) || 0, Number(n) || 0));
+  }
   // a brand-new session may take a moment to be readable everywhere: try again before signing out
   if (res.status === 401 && token && Date.now() - startedAt < FRESH_SESSION_MS && attempt < 4) {
     await sleep(400 * 2 ** attempt);

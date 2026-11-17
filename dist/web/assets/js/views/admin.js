@@ -3,6 +3,20 @@ import { h, mount, button, field, badge, table, modal, avatar, attempt, confirmD
 import { applyTheme, TOKENS, PRESETS, DEFAULT_THEME } from '../theme.js';
 import { store, loadMe } from '../app.js';
 
+// Reads can lag a moment behind writes (database replicas), so what was just decided here
+// is kept for a minute: a decided request never comes back, an approved person shows up at once.
+const RECENT_MS = 60_000;
+const decidedRequests = new Map(); // request id -> time
+const approvedMembers = new Map(); // member id -> { member, at }
+const recent = (at) => Date.now() - at < RECENT_MS;
+
+function setRequestsBadge(n) {
+  const item = document.querySelector('.drawer a[href="#/admin/members"]');
+  if (!item) return;
+  item.querySelector('.count-pill')?.remove();
+  if (n > 0) item.append(h('span', { class: 'count-pill' }, String(n)));
+}
+
 const TABS = [
   ['company', 'Company', 'building'],
   ['modules', 'Modules', 'modules'],
@@ -17,7 +31,7 @@ export async function adminView(root, { params }) {
     mount(root, pageHeader('Administration'), h('p', { class: 'muted' }, 'Only admins can access this area.'));
     return;
   }
-  const tab = params.tab || 'company';
+  const tab = params.teamId ? 'teams' : params.tab || 'company';
   const body = h('div', {});
   mount(
     root,
@@ -27,6 +41,7 @@ export async function adminView(root, { params }) {
   );
   const views = { company, members, teams, invites, appearance, modules };
   const reload = () => adminView(root, { params });
+  if (params.teamId) return teamDetail(body, params.teamId);
   return (views[tab] || company)(body, reload);
 }
 
@@ -68,7 +83,10 @@ async function company(root, reload) {
 
 // ------------------------------------------------------------------ members
 async function members(root, reload) {
-  const [{ members: list }, { teams: allTeams }, { requests }] = await Promise.all([get('/api/org/members'), get('/api/teams'), get('/api/org/requests')]);
+  const [{ members: fetched }, { teams: allTeams }, { requests: pending }] = await Promise.all([get('/api/org/members'), get('/api/teams'), get('/api/org/requests')]);
+  const requests = pending.filter((r) => !(decidedRequests.has(r.id) && recent(decidedRequests.get(r.id))));
+  const list = [...fetched];
+  for (const [id, { member, at }] of approvedMembers) if (recent(at) && !list.some((m) => m.id === id)) list.push({ avatar: null, role: 'member', providers: [], ...member });
   const teamName = (id) => allTeams.find((t) => t.id === id)?.name;
 
   const edit = (m) => {
@@ -138,9 +156,13 @@ async function members(root, reload) {
 // People who registered this company's name and wait for an admin's decision.
 function requestsSection(requests, allTeams, reload) {
   const { org } = store.me;
-  const after = async (r, msg) => {
+  // update the screen right away: the decided request leaves the list and the menu badge
+  const after = (req, r, msg) => {
     toast(r.emailSent ? msg : `${msg} (no email sent: email isn't configured)`, r.emailSent ? 'success' : 'info');
-    await loadMe();
+    decidedRequests.set(req.id, Date.now());
+    if (r.member) approvedMembers.set(r.member.id, { member: r.member, at: Date.now() });
+    store.me.pendingRequests = Math.max(0, (store.me.pendingRequests || 0) - 1);
+    setRequestsBadge(store.me.pendingRequests);
     reload();
   };
 
@@ -159,7 +181,7 @@ function requestsSection(requests, allTeams, reload) {
             const r = await attempt(() => post(`/api/org/requests/${req.id}/approve`, { teamIds }));
             if (r) {
               dlg.close();
-              after(r, `${req.name} joined ${org.name}`);
+              after(req, r, `${req.name} joined ${org.name}`);
             }
           },
         },
@@ -174,7 +196,7 @@ function requestsSection(requests, allTeams, reload) {
     const ok = await confirmDialog(`Deny ${req.name}'s access? They'll get an email and can't register ${org.name} again; they can still register a different company.`, { danger: true, confirmLabel: 'Deny access' });
     if (!ok) return;
     const r = await attempt(() => post(`/api/org/requests/${req.id}/deny`));
-    if (r) after(r, `Access denied for ${req.name}`);
+    if (r) after(req, r, `Access denied for ${req.name}`);
   };
 
   return section(
@@ -239,6 +261,82 @@ async function modules(root) {
   );
 }
 
+// ------------------------------------------------------------------ one team: its members
+async function teamDetail(root, teamId) {
+  const [{ teams: allTeams }, { members: fetched }] = await Promise.all([get('/api/teams'), get('/api/org/members')]);
+  const team = allTeams.find((t) => t.id === teamId);
+  if (!team) {
+    mount(root, h('p', { class: 'muted' }, 'This team no longer exists. ', h('a', { href: '#/admin/teams' }, 'Back to teams')));
+    return;
+  }
+  // local copy, updated from each answer: no refetch that could come back from a lagging replica
+  let people = fetched;
+  const teamName = (id) => allTeams.find((t) => t.id === id)?.name;
+  const replace = (member) => {
+    people = people.map((p) => (p.id === member.id ? { ...p, ...member } : p));
+    if (member.id === store.me.user.id) loadMe().catch(() => {}); // your own teams decide which boards you see
+  };
+
+  const draw = () => {
+    const inTeam = people.filter((p) => p.teamIds.includes(team.id)).sort((a, b) => a.name.localeCompare(b.name));
+    const others = people.filter((p) => !p.teamIds.includes(team.id)).sort((a, b) => a.name.localeCompare(b.name));
+    const pick = h('select', { 'aria-label': 'Person to add', disabled: !others.length }, others.length ? others.map((p) => h('option', { value: p.id }, `${p.name} — ${p.email}`)) : h('option', {}, 'Everyone is already in this team'));
+    const add = async () => {
+      const userId = pick.value;
+      const person = others.find((p) => p.id === userId);
+      if (!person) return;
+      const r = await attempt(() => post(`/api/teams/${team.id}/members`, { userId }), `${person.name} added to ${team.name}`);
+      if (r) {
+        replace(r.member);
+        draw();
+      }
+    };
+    const remove = async (p) => {
+      const lastTeam = p.teamIds.length === 1;
+      const msg = `Remove ${p.name} from ${team.name}?` + (lastTeam ? ' This is their only team: they will not see any board until they join another one.' : '');
+      if (!(await confirmDialog(msg, { danger: true, confirmLabel: 'Remove' }))) return;
+      const r = await attempt(() => del(`/api/teams/${team.id}/members/${p.id}`), `${p.name} removed from ${team.name}`);
+      if (r) {
+        replace(r.member);
+        draw();
+      }
+    };
+
+    mount(
+      root,
+      h(
+        'section',
+        { class: 'section' },
+        h('nav', { class: 'crumbs', 'aria-label': 'Breadcrumb' }, h('a', { href: '#/admin/teams' }, 'Teams'), h('span', {}, team.name)),
+        h(
+          'div',
+          { class: 'section-row' },
+          h('h2', { class: 'section-title' }, `${team.name} — ${inTeam.length} member${inTeam.length === 1 ? '' : 's'}`),
+          h('div', { class: 'btn-group' }, team.id === store.me.org.defaultTeamId ? badge('Default team') : null, team.groupKey ? badge(`Group ${team.groupKey.split(':')[0]}`, 'info') : null),
+        ),
+        team.groupKey ? h('p', { class: 'muted small section-hint' }, `Synced with ${team.groupKey}: people in that group are added back when they sign in.`) : null,
+        h('div', { class: 'panel team-add' }, h('label', { class: 'field-label' }, 'Add someone from the company'), h('div', { class: 'team-add-row' }, pick, button('Add to team', { variant: 'primary', iconName: 'plus', disabled: !others.length, onClick: add }))),
+        table(
+          ['Name', 'Email', 'Role', 'Other teams', ''],
+          inTeam.map((p) =>
+            h(
+              'tr',
+              {},
+              h('td', {}, h('span', { class: 'person' }, avatar(p), p.name)),
+              h('td', {}, p.email),
+              h('td', {}, p.role === 'admin' ? badge('Admin', 'accent') : badge('Member')),
+              h('td', {}, p.teamIds.filter((id) => id !== team.id).map(teamName).filter(Boolean).join(', ') || h('span', { class: 'muted' }, '—')),
+              h('td', { class: 'right' }, button('Remove', { variant: 'danger-ghost', size: 'sm', iconName: 'x', onClick: () => remove(p) })),
+            ),
+          ),
+          { empty: 'Nobody in this team yet. Add someone above.' },
+        ),
+      ),
+    );
+  };
+  draw();
+}
+
 // ------------------------------------------------------------------ teams
 async function teams(root, reload) {
   const [{ teams: list }, { members: people }] = await Promise.all([get('/api/teams'), get('/api/org/members')]);
@@ -297,12 +395,12 @@ async function teams(root, reload) {
         list.map((t) =>
           h(
             'tr',
-            {},
-            h('td', { class: 'strong' }, t.name, t.id === store.me.org.defaultTeamId ? [' ', badge('Default')] : null),
+            { class: 'row-link', onClick: () => (location.hash = `#/admin/teams/${t.id}`) },
+            h('td', {}, h('a', { href: `#/admin/teams/${t.id}`, class: 'strong' }, t.name), t.id === store.me.org.defaultTeamId ? [' ', badge('Default')] : null),
             h('td', {}, t.groupKey ? badge(`Group ${t.groupKey.split(':')[0]}`, 'info') : badge('Manual')),
             h('td', {}, String(count(t.id))),
             h('td', {}, fmtDateTime(t.createdAt)),
-            h('td', { class: 'right' }, button('', { iconName: 'edit', variant: 'ghost', size: 'xs', title: 'Edit', onClick: () => edit(t) })),
+            h('td', { class: 'right' }, button('', { iconName: 'edit', variant: 'ghost', size: 'xs', title: 'Edit name', onClick: (e) => (e.stopPropagation(), edit(t)) })),
           ),
         ),
       ),
