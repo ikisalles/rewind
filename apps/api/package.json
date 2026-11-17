@@ -1,0 +1,15 @@
+{
+  "name": "@rewind/api",
+  "version": "0.2.0",
+  "description": "Rewind API composition (core + enabled modules) and its runtime adapters: Node, Cloudflare Workers, Azion Functions.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./index.js"
+  },
+  "dependencies": {
+    "@rewind/core": "*",
+    "@rewind/retro": "*"
+  }
+}

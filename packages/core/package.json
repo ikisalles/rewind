@@ -1,0 +1,15 @@
+{
+  "name": "@rewind/core",
+  "version": "0.2.0",
+  "description": "Rewind API kernel: auth, companies, people, teams, invites, access requests and the module system.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.js",
+    "./storage/memory": "./src/storage/memory.js",
+    "./storage/sql": "./src/storage/sql.js",
+    "./storage/kv": "./src/storage/kv.js",
+    "./testing": "./test/helpers.js"
+  }
+}

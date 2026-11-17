@@ -1,0 +1,29 @@
+{
+  "name": "rewind",
+  "version": "0.2.0",
+  "description": "Rewind — listening to and giving a voice to the team.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node apps/api/node/server.js",
+    "dev": "node apps/api/node/dev.js",
+    "test": "node --test \"apps/api/test/*.test.js\" \"modules/*/test/*.test.js\" \"packages/*/test/*.test.js\"",
+    "build:web": "node scripts/build-web.mjs",
+    "azion:setup": "node scripts/azion-setup.mjs",
+    "azion:build": "npm run build:web && azion build",
+    "azion:deploy": "npm run build:web && azion deploy --local"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ikisalles/rewind.git"
+  },
+  "workspaces": [
+    "packages/*",
+    "modules/*",
+    "apps/*"
+  ]
+}

@@ -1,0 +1,53 @@
+name: rewind
+
+# docker compose up                           -> Rewind at http://localhost:8787 (data in the rewind-data volume)
+# docker compose --profile test run --rm test -> runs the tests
+services:
+  rewind:
+    build: .
+    image: rewind
+    ports:
+      - "${PORT:-8787}:8787"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_URL: ${APP_URL:-http://localhost:8787}
+    volumes:
+      - rewind-data:/app/.data
+    restart: unless-stopped
+
+  # Development: uses the code on your machine and restarts the API on every change.
+  # The frontend has no build step, so just reload the browser.
+  dev:
+    image: rewind
+    build: .
+    profiles: ["dev"]
+    command: ["node", "apps/api/node/dev.js"]
+    ports:
+      - "${PORT:-8787}:8787"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: development
+      APP_URL: ${APP_URL:-http://localhost:8787}
+    volumes:
+      - ./packages:/app/packages:ro
+      - ./modules:/app/modules:ro
+      - ./apps:/app/apps:ro
+      - ./scripts:/app/scripts:ro
+      - rewind-data:/app/.data
+
+  test:
+    image: rewind
+    build: .
+    profiles: ["test"]
+    command: ["npm", "test"]
+    volumes:
+      - ./packages:/app/packages:ro
+      - ./modules:/app/modules:ro
+      - ./apps:/app/apps:ro
+
+volumes:
+  rewind-data:

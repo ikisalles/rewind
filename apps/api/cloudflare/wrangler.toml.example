@@ -1,0 +1,33 @@
+# Copy to the repository root as wrangler.toml and adjust.
+name = "rewind"
+main = "apps/api/cloudflare/worker.js"
+compatibility_date = "2024-11-01"
+
+[assets]
+directory = "./dist/web"   # npm run build:web
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# Recommended: D1 (strongly consistent). Create with: npx wrangler d1 create rewind
+[[d1_databases]]
+binding = "DB"
+database_name = "rewind"
+database_id = "<your-d1-database-id>"
+
+# Alternative: KV (eventually consistent)
+# [[kv_namespaces]]
+# binding = "REWIND_KV"
+# id = "<your-kv-namespace-id>"
+
+[vars]
+# APP_URL = "https://rewind.example.com"
+# ALLOW_SIGNUP = "true"
+# GOOGLE_FETCH_GROUPS = "false"
+# MICROSOFT_TENANT = "common"
+# EMAIL_FROM = "Rewind <rewind@example.com>"
+
+# Secrets (npx wrangler secret put NAME):
+#   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+#   GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
+#   MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET
+#   RESEND_API_KEY

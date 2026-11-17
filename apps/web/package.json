@@ -1,0 +1,10 @@
+{
+  "name": "@rewind/web",
+  "version": "0.2.0",
+  "description": "Rewind web shell: static HTML/CSS/JS (no build). Modules plug in their views, menu items and dashboard widgets.",
+  "license": "MIT",
+  "private": true,
+  "dependencies": {
+    "@rewind/retro": "*"
+  }
+}
