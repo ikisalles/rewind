@@ -45,3 +45,26 @@ export async function verifyPassword(password, stored) {
   for (let i = 0; i < bits.length; i++) diff |= bits.charCodeAt(i) ^ hashHex.charCodeAt(i);
   return diff === 0;
 }
+
+// Secrets kept for later use (integration tokens): AES-GCM with a key derived from a server
+// secret (env SECRETS_KEY). Without that secret they are stored as given ("plain:" prefix).
+async function aesKey(secret) {
+  const raw = await crypto.subtle.digest('SHA-256', enc.encode(secret));
+  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
+export async function sealSecret(text, secret) {
+  if (!secret) return `plain:${text}`;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await aesKey(secret), enc.encode(text));
+  return `aesgcm:${toHex(iv)}:${toHex(data)}`;
+}
+
+export async function openSecret(sealed, secret) {
+  if (!sealed) return null;
+  if (sealed.startsWith('plain:')) return sealed.slice(6);
+  const [, ivHex, dataHex] = sealed.split(':');
+  if (!secret) throw new Error('SECRETS_KEY is needed to read this secret');
+  const data = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromHex(ivHex) }, await aesKey(secret), fromHex(dataHex));
+  return new TextDecoder().decode(data);
+}

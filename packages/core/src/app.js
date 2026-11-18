@@ -9,7 +9,7 @@
 //   const response = await app.fetch(request);
 
 import { createRouter, corsHeaders, fail, HttpError, json, readJson, redirect } from './lib/http.js';
-import { hashPassword, newId, randomToken, verifyPassword } from './lib/crypto.js';
+import { hashPassword, newId, randomToken, sealSecret, verifyPassword } from './lib/crypto.js';
 import { authorizeUrl, enabledProviders, exchangeCode, PROVIDERS, PUBLIC_DOMAINS } from './auth/providers.js';
 import { escapeHtml, isColor, isEmail, normalizeOrgName, now, str } from './util.js';
 import { readYourWrites } from './storage/consistency.js';
@@ -17,7 +17,7 @@ import { readYourWrites } from './storage/consistency.js';
 // Core keys that should exist when looked up (a token someone holds, an id from a link...):
 // on an eventually consistent store, a miss on them is read again before giving up.
 // On Durable Object storage: company data lives in the company's object (keys "<kind>:<orgId>:...").
-export const CORE_SHARDS = { user: 'org', team: 'org', inviteidx: 'org', joinreq: 'org' };
+export const CORE_SHARDS = { user: 'org', team: 'org', inviteidx: 'org', joinreq: 'org', integration: 'org' };
 
 const CORE_KEY_PREFIXES = ['session:', 'authcode:', 'oauth:', 'user:', 'org:', 'cred:', 'team:', 'invite:'];
 
@@ -59,6 +59,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     joinRequest: (orgId, id) => `joinreq:${orgId}:${id}`,
     joinRequests: (orgId) => `joinreq:${orgId}:`,
     joinRequestEmail: (email) => `joinreqemail:${email}`,
+    integrations: (orgId, userId) => `integration:${orgId}:${userId}`,
   };
 
   const appUrl = (req) => (env.APP_URL || new URL(req.url).origin).replace(/\/$/, '');
@@ -552,6 +553,69 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     return json({ user: c.user });
   });
 
+  // ------------------------------------------------------------ personal integrations
+  // Each person keeps their own tokens for third-party tools. Tokens are write-only: they are
+  // stored sealed (see sealSecret) and the API only ever shows their last characters.
+  const INTEGRATIONS = {
+    jira: { fields: { site: 200, email: 200 }, required: ['site', 'email'] },
+    github: { fields: {}, required: [] },
+  };
+
+  const integrationView = (saved) =>
+    Object.fromEntries(
+      Object.keys(INTEGRATIONS).map((id) => {
+        const { token, ...rest } = saved?.[id] || {};
+        return [id, saved?.[id] ? { configured: true, ...rest } : { configured: false }];
+      }),
+    );
+
+  route('GET', '/api/me/integrations', async (c) => json({ integrations: integrationView(await db.get(K.integrations(c.org.id, c.user.id))) }));
+
+  route('PUT', '/api/me/integrations/:provider', async (c) => {
+    const spec = INTEGRATIONS[c.params.provider];
+    if (!spec) fail(404, 'Unknown integration');
+    const key = K.integrations(c.org.id, c.user.id);
+    const saved = (await db.get(key)) || {};
+    const current = saved[c.params.provider];
+    const entry = {};
+    for (const [name, max] of Object.entries(spec.fields)) entry[name] = str(c.body[name], max);
+    for (const name of spec.required) if (!entry[name]) fail(400, `Enter the ${name}`);
+    if (entry.site) {
+      const site = /^https?:\/\//i.test(entry.site) ? entry.site : `https://${entry.site}`;
+      try {
+        const u = new URL(site);
+        if (u.protocol !== 'https:') throw new Error();
+        entry.site = u.origin;
+      } catch {
+        fail(400, 'Enter a valid https site address');
+      }
+    }
+    if (entry.email && !isEmail(entry.email)) fail(400, 'Enter a valid email');
+    const token = str(c.body.token, 2000);
+    if (token) {
+      entry.token = await sealSecret(token, env.SECRETS_KEY);
+      entry.tokenHint = token.length > 8 ? `…${token.slice(-4)}` : '…';
+    } else if (current?.token) {
+      entry.token = current.token; // keeping the saved token, only the other fields changed
+      entry.tokenHint = current.tokenHint;
+    } else {
+      fail(400, 'Enter the token');
+    }
+    entry.updatedAt = now();
+    const next = { ...saved, [c.params.provider]: entry };
+    await db.put(key, next);
+    return json({ integrations: integrationView(next) });
+  });
+
+  route('DELETE', '/api/me/integrations/:provider', async (c) => {
+    if (!INTEGRATIONS[c.params.provider]) fail(404, 'Unknown integration');
+    const key = K.integrations(c.org.id, c.user.id);
+    const { [c.params.provider]: removed, ...rest } = (await db.get(key)) || {};
+    if (Object.keys(rest).length) await db.put(key, rest);
+    else await db.delete(key);
+    return json({ integrations: integrationView(rest) });
+  });
+
   // ------------------------------------------------------------ organization (admin)
   route('PATCH', '/api/org', async (c) => {
     requireAdmin(c);
@@ -621,6 +685,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     if (!target) fail(404, 'Member not found');
     await db.delete(K.user(c.org.id, target.id));
     await db.delete(K.userEmail(target.email));
+    await db.delete(K.integrations(c.org.id, target.id));
     await db.delete(K.cred(target.id));
     return json({ ok: true });
   });

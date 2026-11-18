@@ -1,6 +1,6 @@
 // Shell: router, layout and menu. Core pages (sign-in, home, administration)
 // live here; every other page comes from a module (see modules.js).
-import { patch, post, session } from './api.js';
+import { patch, session } from './api.js';
 import { applyTheme } from './theme.js';
 import { h, icon, mount, button, modal, avatar, attempt } from './ui.js';
 import { APP_NAME, SLOGAN, store, loadMe, logo, footer } from './app.js';
@@ -8,6 +8,7 @@ import { MODULES } from './modules.js';
 import { loginView, signupView, inviteView, callbackView } from './views/auth.js';
 import { homeView } from './views/home.js';
 import { adminView } from './views/admin.js';
+import { accountView } from './views/account.js';
 
 // --------------------------------------------------------------- modules
 // Each module's stylesheet is added once, from the module's own folder.
@@ -25,6 +26,9 @@ const routes = [
   ['/admin', adminView],
   ['/admin/:tab', adminView],
   ['/admin/teams/:teamId', adminView],
+  ['/account', accountView],
+  ['/account/:section', accountView],
+  ['/account/integrations/:provider', accountView],
   ...MODULES.flatMap((m) => m.routes),
 ];
 const aliases = MODULES.flatMap((m) => m.aliases || []);
@@ -126,30 +130,6 @@ function shell(content, path) {
   const backdrop = h('div', { class: 'drawer-backdrop', onClick: () => toggle(false) });
   const toggle = (open) => document.body.classList.toggle('drawer-open', open ?? !document.body.classList.contains('drawer-open'));
 
-  const userMenu = () =>
-    modal({
-      title: 'My account',
-      body: h(
-        'div',
-        { class: 'account' },
-        h('div', { class: 'account-head' }, avatar(user, 40), h('div', {}, h('strong', {}, user.name), h('div', { class: 'muted small' }, user.email))),
-        h('dl', { class: 'kv' }, h('dt', {}, 'Company'), h('dd', {}, org.name), h('dt', {}, 'Role'), h('dd', {}, isAdmin ? 'Admin' : 'Member')),
-      ),
-      actions: [
-        button('Sign out', {
-          variant: 'danger',
-          iconName: 'logout',
-          onClick: async () => {
-            await post('/api/auth/logout').catch(() => {});
-            session.clear();
-            store.me = null;
-            location.hash = '#/login';
-            location.reload();
-          },
-        }),
-      ],
-    });
-
   return h(
     'div',
     { class: 'shell' },
@@ -161,7 +141,7 @@ function shell(content, path) {
         'div',
         { class: 'topbar-right' },
         h('span', { class: 'org-chip' }, icon('building', 14), org.name),
-        h('button', { class: 'btn btn-icon', title: 'My account', 'aria-label': 'My account', onClick: userMenu }, avatar(user, 22)),
+        h('a', { href: '#/account', class: `btn btn-icon${path.startsWith('/account') ? ' active' : ''}`, title: 'My account', 'aria-label': 'My account' }, avatar(user, 22)),
       ),
     ),
     drawer,
