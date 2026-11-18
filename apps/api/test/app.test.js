@@ -116,3 +116,75 @@ test('Administration → Modules: admins see the installed modules; retro is req
   assert.equal(on.data.modules[1].enabled, true);
   assert.deepEqual((await call('GET', '/api/dashboard', null, bia)).data.modules, ['retro', 'gmud']);
 });
+
+test('groups from the identity provider merge with teams made in Rewind (no duplicates)', async () => {
+  const realFetch = globalThis.fetch;
+  let groups = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('oauth2.googleapis.com/token')) return Response.json({ access_token: 'x' });
+    if (u.includes('openidconnect.googleapis.com')) return Response.json({ sub: 'bia', email: 'bia@acme.io', email_verified: true, name: 'Bia', hd: 'acme.io' });
+    if (u.includes('cloudidentity')) return Response.json({ memberships: groups.map((g) => ({ groupKey: { id: g.id }, displayName: g.name })) });
+    return realFetch(url);
+  };
+  try {
+    const { call, app } = setup({ GOOGLE_CLIENT_ID: 'id', GOOGLE_CLIENT_SECRET: 's', GOOGLE_FETCH_GROUPS: 'true' });
+    const { admin, bia, me } = await bootstrap(call);
+    const login = async () => {
+      const start = await app.fetch(new Request('https://rewind.test/api/auth/oauth/google/start'));
+      const state = new URL(start.headers.get('location')).searchParams.get('state');
+      const cb = await app.fetch(new Request(`https://rewind.test/api/auth/oauth/google/callback?code=c&state=${state}`));
+      return new URLSearchParams(cb.headers.get('location').split('?')[1]);
+    };
+    const teams = async () => (await call('GET', '/api/me', null, admin)).data.teams;
+    const biaTeams = async () => (await call('GET', '/api/me', null, bia)).data.user.teamIds;
+
+    // 1. a team made in Rewind, then the same group arrives: linked, not duplicated
+    const payments = (await call('POST', '/api/teams', { name: 'Payments Squad' }, admin)).data.team;
+    const board = (await call('POST', '/api/boards', { name: 'Payments retro', teamId: payments.id }, admin)).data.board;
+    groups = [{ id: 'payments@acme.io', name: 'payments squad ' }];
+    assert.ok((await login()).get('code'));
+    let list = await teams();
+    assert.equal(list.filter((t) => /payments/i.test(t.name)).length, 1);
+    assert.equal(list.find((t) => t.id === payments.id).groupKey, 'google:payments@acme.io');
+    assert.ok((await biaTeams()).includes(payments.id));
+
+    // 2. an older duplicate (group team first, manual one later): merged into the older, with its data
+    groups = [{ id: 'ops@acme.io', name: 'Ops' }];
+    await login();
+    const opsGroup = (await teams()).find((t) => t.groupKey === 'google:ops@acme.io');
+    // simulate a duplicate from before the rule: a manual "OPS" team with its own board, member, change and approver role
+    const opsManual = (await call('POST', '/api/teams', { name: 'OPS' }, admin)).data.team;
+    const opsBoard = (await call('POST', '/api/boards', { name: 'Ops board', teamId: opsManual.id }, admin)).data.board;
+    const dora = (await call('POST', '/api/invites', { email: 'dora@acme.io', teamId: opsManual.id }, admin)).data.invites[0];
+    await call('PATCH', '/api/org/modules/gmud', { enabled: true }, admin);
+    const change = (await call('POST', '/api/gmud/changes', {}, admin)).data.change;
+    await call('PATCH', `/api/gmud/changes/${change.id}`, { section: 'overview', data: { title: 'x', teamId: opsManual.id } }, admin);
+    await call('PUT', '/api/gmud/settings', { approverTeams: { technical: [opsManual.id] } }, admin);
+
+    await login(); // Bia again, still in the Ops group
+    list = await teams();
+    assert.equal(list.filter((t) => /^ops$/i.test(t.name)).length, 1);
+    assert.equal(list.some((t) => t.id === opsManual.id), false); // the newer one went away
+    const kept = list.find((t) => t.id === opsGroup.id);
+    assert.equal(kept.groupKey, 'google:ops@acme.io');
+    const boards = (await call('GET', '/api/boards', null, admin)).data.boards;
+    assert.equal(boards.find((b) => b.id === opsBoard.id).teamId, kept.id);
+    assert.equal(boards.find((b) => b.id === board.id).teamId, payments.id);
+    assert.equal((await call('GET', `/api/invites/${dora.token}`)).data.teamName, 'Ops');
+    assert.equal((await call('GET', `/api/gmud/changes/${change.id}`, null, admin)).data.change.overview.teamId, kept.id);
+    assert.deepEqual((await call('GET', '/api/gmud/settings', null, admin)).data.settings.approverTeams.technical, [kept.id]);
+
+    // 3. different names: merged by hand
+    const pag = (await call('POST', '/api/teams', { name: 'Pagamentos' }, admin)).data.team;
+    await call('POST', `/api/teams/${pag.id}/members`, { userId: me.user.id }, admin);
+    assert.equal((await call('POST', `/api/teams/${pag.id}/merge`, { into: payments.id }, bia)).status, 403);
+    assert.equal((await call('POST', `/api/teams/${pag.id}/merge`, { into: pag.id }, admin)).status, 400);
+    assert.equal((await call('POST', `/api/teams/${kept.id}/merge`, { into: payments.id }, admin)).status, 409); // two different groups
+    assert.equal((await call('POST', `/api/teams/${pag.id}/merge`, { into: payments.id }, admin)).status, 200);
+    assert.equal((await teams()).some((t) => t.id === pag.id), false);
+    assert.ok((await call('GET', '/api/me', null, admin)).data.user.teamIds.includes(payments.id));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

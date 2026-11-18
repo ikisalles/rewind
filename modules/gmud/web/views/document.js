@@ -192,6 +192,45 @@ function printPdf(number) {
   document.title = title;
 }
 
+// One "Download" button with a menu below it: PDF or Word.
+function downloadMenu(options) {
+  const menu = h('div', { class: 'dl-menu', role: 'menu', hidden: true });
+  const toggle = h('button', { type: 'button', class: 'btn btn-default', 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, icon('download'), h('span', {}, 'Download'), icon('down', 14));
+  const wrap = h('div', { class: 'dl-wrap' }, toggle, menu);
+  const close = () => {
+    menu.hidden = true;
+    toggle.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', outside, true);
+    document.removeEventListener('keydown', onKey);
+  };
+  const outside = (e) => !wrap.contains(e.target) && close();
+  const onKey = (e) => {
+    if (e.key === 'Escape') {
+      close();
+      toggle.focus();
+    }
+  };
+  const open = () => {
+    menu.hidden = false;
+    toggle.setAttribute('aria-expanded', 'true');
+    document.addEventListener('click', outside, true);
+    document.addEventListener('keydown', onKey);
+    menu.querySelector('button')?.focus();
+  };
+  toggle.addEventListener('click', () => (menu.hidden ? open() : close()));
+  for (const [label, hint, run] of options) {
+    menu.append(
+      h(
+        'button',
+        { type: 'button', class: 'dl-item', role: 'menuitem', onClick: () => (close(), run()) },
+        icon('file', 14),
+        h('span', {}, h('strong', {}, label), h('small', { class: 'muted block' }, hint)),
+      ),
+    );
+  }
+  return wrap;
+}
+
 export async function documentView(root, { params }) {
   await loadPeople();
   const [view, { settings }] = await Promise.all([get(`/api/gmud/changes/${params.id}`), get('/api/gmud/settings')]);
@@ -216,8 +255,10 @@ export async function documentView(root, { params }) {
         'div',
         { class: 'page-actions' },
         draftForMe ? h('a', { class: 'btn btn-default', href: `#/changes/${change.id}/edit?step=approval` }, icon('edit'), 'Back to editing') : h('a', { class: 'btn btn-default', href: `#/changes/${change.id}` }, 'Back to the change'),
-        button('Save as PDF', { iconName: 'download', onClick: () => printPdf(change.number) }),
-        button('Download Word', { iconName: 'file', onClick: () => downloadWord(sheet, change.number) }),
+        downloadMenu([
+          ['PDF', 'Opens the print dialog: choose “Save as PDF”', () => printPdf(change.number)],
+          ['Word (.doc)', 'Opens in Word, Google Docs or LibreOffice', () => downloadWord(sheet, change.number)],
+        ]),
         draftForMe
           ? button('Submit for approval', {
               variant: 'primary',

@@ -1,100 +1,16 @@
-import { get, post, patch, del, session, apiUrl, minRev } from '@rewind/web/api.js';
+import { get, post, patch, del, minRev } from '@rewind/web/api.js';
+import { keepUpdated as keepLive } from '@rewind/web/live.js';
 import { h, mount, button, field, badge, modal, icon, avatar, fmtDate, attempt, confirmDialog, copyText, pageHeader } from '@rewind/web/ui.js';
 import { applyTheme } from '@rewind/web/theme.js';
 import { logo, footer, APP_NAME, store } from '@rewind/web/app.js';
 import { statusBadge, sprintForm } from './boards.js';
 import { loadTemplates, templatePicker } from './templates.js';
 
-const POLL_MS = Math.max(2, Number(window.REWIND_CONFIG?.pollSeconds) || 4) * 1000;
-
-// Don't repaint while someone is typing in the page.
-const typing = (root) => {
-  const el = document.activeElement;
-  return el && root.contains(el) && ['TEXTAREA', 'INPUT', 'SELECT'].includes(el.tagName);
-};
-
 // id of the card being dragged (drag & drop merge)
 let draggingId = null;
 
-const LIVE_FALLBACK_MS = 30_000; // safety poll while the live connection is up
-const busy = (root) => document.hidden || draggingId || typing(root) || document.querySelector('.modal-overlay');
-
-let serverConfig;
-const liveAvailable = async () => (serverConfig ??= await get('/api/config').catch(() => ({}))).realtime === true;
-
-// Keeps a sprint up to date: live updates over a WebSocket when the server offers them
-// (Durable Objects / in-process hub), polling otherwise (and as a safety net).
-// Never repaints while someone is typing, dragging a card or has a window open: the
-// update waits until they're done.
-function keepUpdated(root, refresh, liveUrl) {
-  let stopped = false;
-  let pending = false;
-  let lastRefresh = Date.now();
-  let ws = null;
-  let live = false;
-  let retry = 0;
-  let reconnect = null;
-  let ping = null;
-
-  const run = () => {
-    if (busy(root)) return void (pending = true);
-    pending = false;
-    lastRefresh = Date.now();
-    refresh().catch(() => {});
-  };
-  // a change happened elsewhere: load until we see at least its revision
-  const changed = (rev) => {
-    if (busy(root)) return void (pending = true);
-    pending = false;
-    lastRefresh = Date.now();
-    refresh(rev).catch(() => {});
-  };
-
-  const timer = setInterval(() => {
-    if (pending) return run();
-    const every = live ? LIVE_FALLBACK_MS : POLL_MS;
-    if (Date.now() - lastRefresh >= every) run();
-  }, 1000);
-
-  const connect = async () => {
-    if (stopped || !liveUrl || !('WebSocket' in window) || !(await liveAvailable())) return;
-    const token = session.get();
-    if (!token) return;
-    const url = new URL(apiUrl(liveUrl), location.href);
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(url, ['rewind', token]);
-    ws.onopen = () => {
-      live = true;
-      retry = 0;
-      ping = setInterval(() => ws.readyState === 1 && ws.send('ping'), 25_000);
-      run(); // catch up on anything that changed while connecting
-    };
-    ws.onmessage = (e) => {
-      if (e.data === 'pong') return;
-      let rev = 0;
-      try {
-        rev = Number(JSON.parse(e.data).rev) || 0;
-      } catch {
-        /* older message format */
-      }
-      changed(rev);
-    };
-    ws.onclose = () => {
-      live = false;
-      clearInterval(ping);
-      if (!stopped) reconnect = setTimeout(connect, Math.min(60_000, 1000 * 2 ** retry++));
-    };
-  };
-  connect();
-
-  return () => {
-    stopped = true;
-    clearInterval(timer);
-    clearTimeout(reconnect);
-    clearInterval(ping);
-    ws?.close();
-  };
-}
+// Live updates (shared with every module, see @rewind/web/live.js): also wait while a card is dragged.
+const keepUpdated = (root, refresh, liveUrl) => keepLive(root, refresh, liveUrl, { busy: () => Boolean(draggingId) });
 
 // ===================================================================== board columns
 // Who wrote a part, as this viewer may see it.
@@ -969,7 +885,7 @@ export async function publicSprintView(root, { params }) {
   let state;
   const load = async () => {
     state = await get(`/api/public/${params.token}`);
-    applyTheme(state.org.theme);
+    applyTheme(); // public link: the theme this browser remembers
   };
   const paint = () => {
     const s = state.sprint;

@@ -1,6 +1,5 @@
-import { get, post, patch, del } from '../api.js';
+import { api, apiUrl, get, post, patch, del } from '../api.js';
 import { h, mount, button, field, badge, table, modal, avatar, attempt, confirmDialog, copyText, fmtDateTime, icon, toast, pageHeader, section } from '../ui.js';
-import { applyTheme, TOKENS, PRESETS, DEFAULT_THEME } from '../theme.js';
 import { store, loadMe, moduleAdminTabs } from '../app.js';
 import { MODULES } from '../modules.js';
 
@@ -25,7 +24,7 @@ const SECTIONS = [
   ['members', 'Members', 'user'],
   ['teams', 'Teams', 'team'],
   ['invites', 'Invites', 'mail'],
-  ['appearance', 'Appearance', 'palette'],
+  ['signin', 'Sign-in & SSO', 'lock'],
 ];
 
 // Company settings: same layout as My account, a menu on the left and the section on the right.
@@ -64,10 +63,41 @@ export async function adminView(root, { params }) {
       body,
     ),
   );
-  const views = { company, members, teams, invites, appearance, modules, ...Object.fromEntries(extra.map((t) => [t.id, t.view])) };
+  const views = { company, members, teams, invites, modules, signin, ...Object.fromEntries(extra.map((t) => [t.id, t.view])) };
   const reload = () => adminView(root, { params });
   if (params.teamId) return teamDetail(body, params.teamId);
   return views[current](body, reload);
+}
+
+// ------------------------------------------------------------------ company logo
+// Shown next to the company name in the header while the company has a sign-in connected.
+// It comes from the company's own website (the domain its sign-in uses).
+function logoPanel(reload) {
+  const { org } = store.me;
+  const run = async (fn, msg) => {
+    if (await attempt(fn, msg)) {
+      await loadMe();
+      window.dispatchEvent(new HashChangeEvent('hashchange')); // redraws the header
+    }
+  };
+  return h(
+    'div',
+    { class: 'panel logo-panel narrow' },
+    org.logo?.url ? h('img', { class: 'logo-preview', src: apiUrl(org.logo.url), alt: `${org.name} logo` }) : h('span', { class: 'logo-preview empty' }, icon('building', 22)),
+    h(
+      'div',
+      { class: 'stack-sm grow' },
+      org.logo?.url
+        ? h('p', { class: 'small' }, 'From ', h('code', {}, org.logo.from), '. It shows next to the company name at the top of every page.')
+        : h('p', { class: 'muted small' }, 'Once your company has a sign-in connected (Sign-in & SSO, or social sign-in with your domain), its logo is taken from your website and shown next to the company name.'),
+      h(
+        'div',
+        { class: 'btn-group' },
+        button(org.logo ? 'Fetch again' : 'Fetch from our website', { size: 'sm', iconName: 'download', onClick: () => run(() => post('/api/org/logo/refresh'), 'Logo updated') }),
+        org.logo ? button('Remove', { size: 'sm', variant: 'danger-ghost', iconName: 'trash', onClick: () => run(() => del('/api/org/logo'), 'Logo removed') }) : null,
+      ),
+    ),
+  );
 }
 
 // ------------------------------------------------------------------ company
@@ -103,7 +133,7 @@ async function company(root, reload) {
     ),
     h('div', {}, button('Save', { type: 'submit', variant: 'primary' })),
   );
-  mount(root, section('Company', form));
+  mount(root, section('Company', form), section('Logo', logoPanel(reload)));
 }
 
 // ------------------------------------------------------------------ members
@@ -309,6 +339,35 @@ async function teamDetail(root, teamId) {
     if (member.id === store.me.user.id) loadMe().catch(() => {}); // your own teams decide which boards you see
   };
 
+  // e.g. "Pagamentos" made in Rewind into "Payments" from the company's identity provider
+  const mergeInto = () => {
+    const targets = allTeams.filter((t) => t.id !== team.id && !(t.groupKey && team.groupKey && t.groupKey !== team.groupKey));
+    if (!targets.length) return toast('No team to merge into (teams following different groups can’t be merged)', 'error');
+    const sel = h('select', { name: 'into' }, targets.map((t) => h('option', { value: t.id }, `${t.name}${t.groupKey ? ` (group ${t.groupKey.split(':')[0]})` : ''}`)));
+    const m = modal({
+      title: `Merge ${team.name} into another team`,
+      body: [
+        field('Keep this team', sel),
+        h('p', { class: 'muted small' }, `${team.name} goes away. Its members, boards, pending invites, changes and approver roles move to the team you keep${team.groupKey ? ', which will follow the same group' : ''}. This can't be undone.`),
+      ],
+      actions: [
+        button('Cancel', { onClick: () => m.close() }),
+        button('Merge', {
+          variant: 'danger',
+          iconName: 'merge',
+          onClick: async () => {
+            const into = targets.find((t) => t.id === sel.value);
+            const r = await attempt(() => post(`/api/teams/${team.id}/merge`, { into: into.id }), `${team.name} merged into ${into.name}`);
+            if (!r) return;
+            m.close();
+            await loadMe().catch(() => {});
+            location.hash = `#/admin/teams/${into.id}`;
+          },
+        }),
+      ],
+    });
+  };
+
   const draw = () => {
     const inTeam = people.filter((p) => p.teamIds.includes(team.id)).sort((a, b) => a.name.localeCompare(b.name));
     const others = people.filter((p) => !p.teamIds.includes(team.id)).sort((a, b) => a.name.localeCompare(b.name));
@@ -344,9 +403,15 @@ async function teamDetail(root, teamId) {
           'div',
           { class: 'section-row' },
           h('h2', { class: 'section-title' }, `${team.name} — ${inTeam.length} member${inTeam.length === 1 ? '' : 's'}`),
-          h('div', { class: 'btn-group' }, team.id === store.me.org.defaultTeamId ? badge('Default team') : null, team.groupKey ? badge(`Group ${team.groupKey.split(':')[0]}`, 'info') : null),
+          h(
+            'div',
+            { class: 'btn-group' },
+            team.id === store.me.org.defaultTeamId ? badge('Default team') : null,
+            team.groupKey ? badge(`Group ${team.groupKey.split(':')[0]}`, 'info') : null,
+            allTeams.length > 1 ? button('Merge into…', { size: 'sm', iconName: 'merge', onClick: mergeInto }) : null,
+          ),
         ),
-        team.groupKey ? h('p', { class: 'muted small section-hint' }, `Synced with ${team.groupKey}: people in that group are added back when they sign in.`) : null,
+        team.groupKey ? h('p', { class: 'muted small section-hint' }, `Follows the group ${team.groupKey}: people in that group join this team when they sign in. A team made in Rewind with the same name as a group is linked to it automatically, never duplicated.`) : null,
         h('div', { class: 'panel team-add' }, h('label', { class: 'field-label' }, 'Add someone from the company'), h('div', { class: 'team-add-row' }, pick, button('Add to team', { variant: 'primary', iconName: 'plus', disabled: !others.length, onClick: add }))),
         table(
           ['Name', 'Email', 'Role', 'Other teams', ''],
@@ -514,78 +579,143 @@ async function invites(root, reload) {
   );
 }
 
-// ------------------------------------------------------------------ appearance
-async function appearance(root) {
-  const base = { ...DEFAULT_THEME, ...(window.REWIND_CONFIG?.theme || {}) };
-  let theme = { ...base, ...store.me.org.theme };
-  const inputs = {};
+// ------------------------------------------------------------------ sign-in & SSO
+// The company's own sign-in: its Google / Microsoft / GitHub apps or any OpenID Connect provider
+// (Okta, Auth0, Keycloak...). Works alongside, or instead of, the platform's providers.
+const SIGNIN = {
+  google: {
+    name: 'Google Workspace',
+    help: ['Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID (Web application). ', 'Add the redirect URI below as an authorized redirect URI.'],
+    groups: 'Read Google Groups to place people in teams (needs the Cloud Identity API).',
+  },
+  microsoft: {
+    name: 'Microsoft Entra ID',
+    help: ['Entra admin center → App registrations → New registration (Web). ', 'Add the redirect URI below, then create a client secret under Certificates & secrets.'],
+    groups: 'Read group memberships to place people in teams (GroupMember.Read.All, admin consent).',
+  },
+  github: {
+    name: 'GitHub',
+    help: ['GitHub organization → Settings → Developer settings → OAuth Apps → New OAuth App. ', 'Use the redirect URI below as the authorization callback URL.'],
+  },
+  oidc: {
+    name: 'SSO (OpenID Connect)',
+    help: ['Okta, Auth0, Keycloak, JumpCloud, OneLogin or any OpenID Connect provider: create a web application (authorization code flow) ', 'with the redirect URI below, and give its issuer URL here.'],
+    groups: 'Read the “groups” claim to place people in teams (the provider must send it).',
+  },
+};
 
-  const set = (key, value) => {
-    theme[key] = value;
-    applyTheme(theme);
+async function signin(root, reload) {
+  const data = await get('/api/org/auth');
+  const { auth, ready, verifiedDomain, platform, redirectUris, emailEnabled, secretsEncrypted } = data;
+
+  const providerCard = (id) => {
+    const spec = SIGNIN[id];
+    const cur = auth.providers[id];
+    const on = ready.some((p) => p.id === id);
+    const form = h(
+      'form',
+      {
+        class: 'stack',
+        onSubmit: async (e) => {
+          e.preventDefault();
+          const d = Object.fromEntries(new FormData(form));
+          const body = { ...d, enabled: d.enabled === 'on', fetchGroups: d.fetchGroups === 'on' };
+          if (await attempt(() => api('PUT', `/api/org/auth/providers/${id}`, body), `${spec.name} saved`)) reload();
+        },
+      },
+      h('p', { class: 'muted small' }, ...spec.help),
+      h('div', { class: 'copy-row' }, h('span', { class: 'muted small copy-label' }, 'Redirect URI'), h('input', { value: redirectUris[id], readonly: true, 'aria-label': 'Redirect URI' }), button('', { iconName: 'copy', title: 'Copy', onClick: () => copyText(redirectUris[id]) })),
+      id === 'oidc'
+        ? h('div', { class: 'grid-2' }, field('Issuer URL', h('input', { name: 'issuer', value: cur?.issuer || '', placeholder: 'https://your-company.okta.com', required: true })), field('Button label', h('input', { name: 'label', value: cur?.label || '', placeholder: 'Okta', maxlength: 40 }), 'Shown as “Continue with …”.'))
+        : null,
+      h(
+        'div',
+        { class: 'grid-2' },
+        field('Client ID', h('input', { name: 'clientId', value: cur?.clientId || '', required: true, autocomplete: 'off' })),
+        field('Client secret', h('input', { name: 'clientSecret', type: 'password', autocomplete: 'off', required: !cur?.hasSecret, placeholder: cur?.hasSecret ? `Saved (${cur.secretHint}). Type a new one to replace it.` : '' })),
+      ),
+      id === 'microsoft' ? field('Tenant', h('input', { name: 'tenant', value: cur?.tenant || '', placeholder: 'organizations, or your tenant ID / domain' }), 'Your tenant ID keeps sign-in to your organization only.') : null,
+      spec.groups ? h('label', { class: 'check-row' }, h('input', { type: 'checkbox', name: 'fetchGroups', checked: Boolean(cur?.fetchGroups) }), h('span', {}, spec.groups)) : null,
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: cur ? cur.enabled : true }), h('span', { class: 'switch-ui' }), h('span', {}, h('strong', {}, 'Enabled'), h('span', { class: 'muted small block' }, 'Shown on the sign-in page to people of your company.'))),
+      h(
+        'div',
+        { class: 'btn-group' },
+        button(cur ? 'Save' : 'Set up', { type: 'submit', variant: 'primary' }),
+        cur
+          ? button('Remove', {
+              variant: 'danger-ghost',
+              iconName: 'trash',
+              onClick: async () => {
+                if (!(await confirmDialog(`Remove the ${spec.name} sign-in? People will sign in with the other options.`, { confirmLabel: 'Remove', danger: true }))) return;
+                if (await attempt(() => del(`/api/org/auth/providers/${id}`), `${spec.name} removed`)) reload();
+              },
+            })
+          : null,
+      ),
+    );
+    return h(
+      'details',
+      { class: 'panel signin-provider', open: Boolean(cur) },
+      h('summary', {}, h('strong', {}, spec.name), on ? badge('On', 'success', 'check') : cur ? badge('Off') : badge('Not set up')),
+      form,
+    );
   };
-  const loadPreset = (p) => {
-    theme = { ...p };
-    for (const { key } of TOKENS) {
-      inputs[key].color.value = theme[key];
-      inputs[key].hex.value = theme[key];
-    }
-    applyTheme(theme);
-  };
 
-  const rows = TOKENS.map(({ key, label }) => {
-    const color = h('input', { type: 'color', value: theme[key], 'aria-label': label });
-    const hex = h('input', { class: 'hex', value: theme[key], maxlength: 7, 'aria-label': `${label} (hex)` });
-    color.addEventListener('input', () => ((hex.value = color.value), set(key, color.value)));
-    hex.addEventListener('change', () => {
-      if (/^#[0-9a-f]{6}$/i.test(hex.value)) (color.value = hex.value), set(key, hex.value);
-      else hex.value = theme[key];
-    });
-    inputs[key] = { color, hex };
-    return h('div', { class: 'color-row' }, color, h('span', { class: 'color-label' }, label), hex);
-  });
-
-  const preview = h(
-    'div',
-    { class: 'preview panel' },
-    h('div', { class: 'preview-top' }, h('span', { class: 'logo-mark small' }, (window.REWIND_CONFIG?.appName || 'Rewind').toUpperCase()), button('Button', { variant: 'primary', size: 'sm' })),
-    h('div', { class: 'columns', style: { '--cols': 2 } },
-      h('section', { class: 'column', style: { '--col': theme.success } }, h('header', { class: 'column-head' }, h('span', { class: 'col-dot' }), h('h3', {}, 'What went well')), h('article', { class: 'note', style: { '--col': '#22c55e' } }, h('p', { class: 'note-text' }, 'Faster deploys'), h('footer', { class: 'note-foot' }, h('span', { class: 'note-author' }, 'Ana'), h('button', { class: 'vote active' }, icon('heart', 13), '3')))),
-      h('section', { class: 'column' }, h('header', { class: 'column-head' }, h('span', { class: 'col-dot' }), h('h3', {}, 'To improve')), h('article', { class: 'note masked' }, h('p', { class: 'note-text' }, h('span', { class: 'redacted' })), h('footer', { class: 'note-foot' }, h('span', { class: 'note-author' }, 'Hidden'))))),
-    h('p', {}, badge('Open', 'success', 'check'), ' ', h('a', { href: '#/admin/appearance' }, 'A link')),
+  const domainsInput = h('input', { name: 'domains', value: (auth.domains.length ? auth.domains : verifiedDomain ? [verifiedDomain] : []).join(', '), placeholder: 'acme.com, acme.com.br' });
+  const policy = h(
+    'form',
+    {
+      class: 'panel stack',
+      onSubmit: async (e) => {
+        e.preventDefault();
+        const d = Object.fromEntries(new FormData(policy));
+        const body = { domains: String(d.domains || '').split(',').map((x) => x.trim()).filter(Boolean), autoProvision: d.autoProvision === 'on', requireSso: d.requireSso === 'on' };
+        if (body.requireSso && !auth.requireSso) {
+          const msg = `Members will only sign in with ${ready.map((p) => p.label).join(' or ')}; their passwords stop working (admins keep theirs for emergencies). Everyone gets ${emailEnabled ? 'an email and ' : ''}a notice in the app explaining how to sign in now.`;
+          if (!(await confirmDialog(msg, { confirmLabel: 'Require it and notify' }))) return;
+        }
+        const r = await attempt(() => api('PUT', '/api/org/auth/policy', body), 'Sign-in policy saved');
+        if (!r) return;
+        if (r.notified) toast(`${r.notified.people} people notified${r.notified.emailEnabled ? `, ${r.notified.emailed} by email` : ' in the app (email is not configured)'}`, 'success');
+        reload();
+      },
+    },
+    field('Company email domains', domainsInput, `People with these emails are sent to your company's sign-in.${verifiedDomain ? ` @${verifiedDomain} is your verified domain.` : ''}`),
+    h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'autoProvision', checked: auth.autoProvision }), h('span', { class: 'switch-ui' }), h('span', {}, h('strong', {}, 'Create accounts for new people'), h('span', { class: 'muted small block' }, 'Someone from these domains signing in with your provider for the first time joins as a member. Off: invite only.'))),
+    h(
+      'label',
+      { class: `switch${ready.length ? '' : ' disabled'}` },
+      h('input', { type: 'checkbox', name: 'requireSso', checked: auth.requireSso, disabled: !ready.length }),
+      h('span', { class: 'switch-ui' }),
+      h('span', {}, h('strong', {}, 'Require company sign-in'), h('span', { class: 'muted small block' }, ready.length ? 'Members can only sign in with your providers above. Admins keep their password for emergencies.' : 'Set up and enable a provider first.')),
+    ),
+    h(
+      'div',
+      { class: 'btn-group' },
+      button('Save policy', { type: 'submit', variant: 'primary' }),
+      ready.length
+        ? button('Notify everyone again', {
+            iconName: 'mail',
+            onClick: async () => {
+              if (!(await confirmDialog(`Send everyone ${emailEnabled ? 'an email and ' : ''}a notice explaining how to sign in with ${ready.map((p) => p.label).join(' or ')}?`))) return;
+              const r = await attempt(() => post('/api/org/auth/notify'));
+              if (r) toast(`${r.notified.people} people notified${r.notified.emailEnabled ? `, ${r.notified.emailed} by email` : ' in the app'}`, 'success');
+            },
+          })
+        : null,
+    ),
+    auth.notifiedAt ? h('p', { class: 'muted small' }, `Last notice sent ${fmtDateTime(auth.notifiedAt)}.`) : null,
   );
 
   mount(
     root,
-    h(
-      'section',
-      { class: 'section' },
-      h('div', { class: 'section-row' }, h('h2', { class: 'section-title' }, 'Company colors'), h('div', { class: 'btn-group' }, Object.entries(PRESETS).map(([name, p]) => button(name, { size: 'sm', onClick: () => loadPreset(p) })))),
-      h(
-        'div',
-        { class: 'appearance' },
-        h(
-          'div',
-          { class: 'panel stack-sm' },
-          rows,
-          h(
-            'div',
-            { class: 'btn-group' },
-            button('Reset to default', { onClick: () => loadPreset(base) }),
-            button('Save colors', {
-              variant: 'primary',
-              onClick: async () => {
-                // store only what differs from the deployment default
-                const diff = Object.fromEntries(Object.entries(theme).filter(([k, v]) => base[k] !== v));
-                if (await attempt(() => patch('/api/org', { theme: diff }), 'Colors saved for the whole company')) await loadMe();
-              },
-            }),
-          ),
-        ),
-        preview,
-      ),
+    section(
+      'Your sign-in providers',
+      h('p', { class: 'muted small section-hint' }, 'Bring your own identity provider: the credentials stay with your company, not with this Rewind installation. People of your company see these buttons after typing their email.'),
+      !secretsEncrypted ? h('p', { class: 'notice small' }, icon('alert', 14), 'This server has no SECRETS_KEY: client secrets are stored without encryption. Ask whoever runs Rewind to set it.') : null,
+      h('div', { class: 'stack' }, Object.keys(SIGNIN).map(providerCard)),
+      platform.length ? h('p', { class: 'muted small', style: { marginTop: '10px' } }, `Also available on this Rewind, for everyone: ${platform.map((p) => p.label).join(', ')}.`) : null,
     ),
+    section('Policy', policy, !emailEnabled ? h('p', { class: 'muted small', style: { marginTop: '8px' } }, 'Email is not configured on this server: notices only show in the app.') : null),
   );
-  // leaving without saving restores the saved theme
-  return () => applyTheme(store.me.org.theme);
 }

@@ -885,7 +885,7 @@ export async function publicSprintView(root, { params }) {
   let state;
   const load = async () => {
     state = await get(`/api/public/${params.token}`);
-    applyTheme(state.org.theme);
+    applyTheme(); // public link: the theme this browser remembers
   };
   const paint = () => {
     const s = state.sprint;

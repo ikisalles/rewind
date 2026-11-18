@@ -30,7 +30,6 @@ function onboardingPanel(done, moduleSteps) {
     { key: 'teams', title: 'Set up your teams', hint: 'Create teams or sign in with a provider that has groups.', href: '#/admin/teams' },
     { key: 'people', title: 'Bring your people in', hint: 'Invite colleagues or allow automatic sign-in for your domain.', href: '#/admin/invites' },
     ...moduleSteps,
-    { key: 'appearance', title: 'Make it yours', hint: 'Optional: use your company colors.', href: '#/admin/appearance' },
   ];
   const count = steps.filter((s) => done[s.key]).length;
   if (count === steps.length) return null;

@@ -1,6 +1,6 @@
 // Shell: router, layout and menu. Core pages (sign-in, home, administration)
 // live here; every other page comes from a module (see modules.js).
-import { patch, session } from './api.js';
+import { apiUrl, del, patch, session } from './api.js';
 import { applyTheme } from './theme.js';
 import { h, icon, mount, button, modal, avatar, attempt } from './ui.js';
 import { APP_NAME, SLOGAN, store, loadMe, logo, footer } from './app.js';
@@ -9,6 +9,9 @@ import { loginView, signupView, inviteView, callbackView } from './views/auth.js
 import { homeView } from './views/home.js';
 import { adminView } from './views/admin.js';
 import { accountView } from './views/account.js';
+
+// the theme this browser remembers, before anything paints (each person's own, see theme.js)
+applyTheme();
 
 // --------------------------------------------------------------- modules
 // Each module's stylesheet is added once, from the module's own folder.
@@ -94,6 +97,7 @@ async function render() {
   mount(app, shell(content, path));
   cleanup = await found.view(content, { params: found.params, query });
   maybeOnboarding();
+  maybeSignInNotice();
 }
 
 window.addEventListener('hashchange', render);
@@ -141,11 +145,12 @@ function shell(content, path) {
     h(
       'header',
       { class: 'topbar' },
-      h('div', { class: 'topbar-left' }, button('', { iconName: 'menu', variant: 'icon', title: 'Menu', onClick: () => toggle() }), logo(), h('span', { class: 'slogan' }, SLOGAN)),
+      h('div', { class: 'topbar-left' }, button('', { iconName: 'menu', variant: 'icon', title: 'Menu', onClick: () => toggle() }), logo()),
       h(
         'div',
         { class: 'topbar-right' },
-        h('span', { class: 'org-chip' }, icon('building', 14), org.name),
+        // the company's logo when it has a sign-in connected (see Company settings → Company)
+        h('span', { class: 'org-chip' }, org.logo?.url ? h('img', { class: 'org-logo', src: apiUrl(org.logo.url), alt: '', width: 16, height: 16 }) : icon('building', 14), org.name),
         h('a', { href: '#/account', class: `btn btn-icon${path.startsWith('/account') ? ' active' : ''}`, title: 'My account', 'aria-label': 'My account' }, avatar(user, 22)),
       ),
     ),
@@ -183,3 +188,32 @@ function maybeOnboarding() {
     ],
   });
 }
+
+// The company changed how it signs in (Company settings → Sign-in & SSO): tell each person once.
+let noticeShown = false;
+function maybeSignInNotice() {
+  const { user, org } = store.me;
+  const n = user.notice;
+  if (noticeShown || n?.type !== 'signin') return;
+  noticeShown = true;
+  const how = n.providers.join(' or ');
+  const close = async () => {
+    await del('/api/me/notice').catch(() => {});
+    user.notice = null;
+    m.close();
+  };
+  const m = modal({
+    title: `${org.name} now signs in with ${how}`,
+    body: h(
+      'div',
+      { class: 'stack' },
+      h('p', {}, h('strong', {}, n.by || 'An admin'), ` set up ${how} for ${org.name}. Next time, type your email `, h('strong', {}, user.email), ' on the sign-in page and choose ', h('strong', {}, `Continue with ${n.providers[0]}`), ', using your work account.'),
+      n.required && user.role !== 'admin' ? h('p', {}, 'Your Rewind password no longer works for this company.') : null,
+      n.required && user.role === 'admin' ? h('p', { class: 'muted small' }, 'As an admin you keep your password for emergencies.') : null,
+      h('p', { class: 'muted small' }, 'Everything you had on Rewind stays the same.'),
+    ),
+    actions: [button('Got it', { variant: 'primary', onClick: close })],
+    onClose: () => del('/api/me/notice').catch(() => {}),
+  });
+}
+

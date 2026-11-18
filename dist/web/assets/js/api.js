@@ -73,6 +73,7 @@ export async function api(method, path, body, attempt = 0) {
   if (!res.ok) {
     const err = new Error(data.error || `Error ${res.status}`);
     err.status = res.status;
+    err.code = data.code; // e.g. 'sso_required'
     throw err;
   }
   return data;

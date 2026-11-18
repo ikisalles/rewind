@@ -817,6 +817,11 @@ export default defineModule({
       if (boards.some((b) => b.teamId === teamId)) fail(400, "Delete this team's boards first");
     }
 
-    return { dashboard, adminDashboard, beforeTeamDelete };
+    // two teams became one: their boards now belong to the team that stays
+    async function onTeamMerge(orgId, fromId, intoId) {
+      for (const b of await db.list(K.boards(orgId))) if (b.teamId === fromId) await db.patch(K.board(orgId, b.id), { teamId: intoId });
+    }
+
+    return { dashboard, adminDashboard, beforeTeamDelete, onTeamMerge };
   },
 });

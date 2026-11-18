@@ -65,23 +65,69 @@ function form(onSubmit, ...children) {
   return el;
 }
 
+// The company's own sign-in buttons (Company settings → Sign-in & SSO).
+function companyButtons(sso, orgId, { hint, invite } = {}) {
+  if (!sso?.length) return null;
+  return h(
+    'div',
+    { class: 'stack-sm' },
+    sso.map((p) => {
+      const qs = new URLSearchParams({ org: orgId, ...(hint ? { hint } : {}), ...(invite ? { invite } : {}) });
+      return h('a', { class: 'btn btn-primary btn-block', href: apiUrl(`/api/auth/oauth/${p.id}/start?${qs}`) }, icon(p.id === 'github' ? 'github' : p.id === 'oidc' ? 'lock' : 'user'), `Continue with ${p.label}`);
+    }),
+  );
+}
+
+// Sign in: the email first, so people of a company with its own sign-in (SSO) get its buttons.
 export async function loginView(root) {
   if (session.get()) return void (location.hash = '#/home');
   const cfg = await loadConfig();
-  mount(
-    root,
-    card(
-      h('h1', {}, 'Sign in'),
-      socialButtons(cfg.providers),
-      form(
-        async (data) => finish((await post('/api/auth/login', data)).token),
-        field('Email', h('input', { name: 'email', type: 'email', required: true, autocomplete: 'email' })),
-        field('Password', h('input', { name: 'password', type: 'password', required: true, autocomplete: 'current-password' })),
-        button('Sign in', { type: 'submit', variant: 'primary', size: 'block' }),
+  const emailStep = (prefill = '') =>
+    mount(
+      root,
+      card(
+        h('h1', {}, 'Sign in'),
+        socialButtons(cfg.providers),
+        form(
+          async ({ email }) => passwordStep(email, await post('/api/auth/discover', { email })),
+          field('Email', h('input', { name: 'email', type: 'email', required: true, autocomplete: 'email', value: prefill, autofocus: true })),
+          button('Continue', { type: 'submit', variant: 'primary', size: 'block' }),
+        ),
+        cfg.allowSignup && h('p', { class: 'muted small center' }, 'Is your company not on Rewind yet? ', h('a', { href: '#/signup' }, 'Register your company')),
       ),
-      cfg.allowSignup && h('p', { class: 'muted small center' }, 'Is your company not on Rewind yet? ', h('a', { href: '#/signup' }, 'Register your company')),
-    ),
-  );
+    );
+
+  const passwordStep = (email, found) => {
+    const message = h('div', {});
+    const pwForm = found.password
+      ? form(
+          async (data) => {
+            try {
+              finish((await post('/api/auth/login', { email, password: data.password })).token);
+            } catch (e) {
+              if (e.code !== 'sso_required') throw e;
+              mount(message, h('p', { class: 'notice small' }, icon('info', 14), e.message));
+            }
+          },
+          field('Password', h('input', { name: 'password', type: 'password', required: true, autocomplete: 'current-password', autofocus: !found.sso.length })),
+          button('Sign in', { type: 'submit', variant: found.sso.length ? 'default' : 'primary', size: 'block' }),
+        )
+      : null;
+    mount(
+      root,
+      card(
+        h('h1', {}, found.org ? `Sign in to ${found.org.name}` : 'Sign in'),
+        h('p', { class: 'muted small' }, email, ' · ', h('button', { type: 'button', class: 'link-btn', onClick: () => emailStep(email) }, 'use another email')),
+        companyButtons(found.sso, found.org?.id, { hint: email }),
+        found.sso.length && pwForm ? h('div', { class: 'divider' }, h('span', {}, 'or with your password')) : null,
+        !found.password ? h('p', { class: 'muted small' }, `${found.org.name} signs in with ${found.sso.map((p) => p.label).join(' or ')}: use your work account.`) : null,
+        message,
+        pwForm,
+      ),
+    );
+  };
+
+  emailStep();
 }
 
 export async function signupView(root) {
@@ -151,13 +197,19 @@ export async function inviteView(root, { params }) {
           ? 'As an admin you can manage the company: people, teams, invites, modules and appearance, and every board.'
           : "As a member you take part in your team's retros: write notes, vote and follow your action items.",
       ),
-      socialButtons(cfg.providers, params.token),
-      form(
-        async (data) => finish((await post(`/api/invites/${params.token}/accept`, data)).token),
-        field('Your name', h('input', { name: 'name', required: true, maxlength: 80, autocomplete: 'name' })),
-        field('Create a password', h('input', { name: 'password', type: 'password', required: true, minlength: 8, autocomplete: 'new-password' })),
-        button('Accept invite', { type: 'submit', variant: 'primary', size: 'block' }),
-      ),
+      // the company's own sign-in first; the platform's buttons only when the company has none
+      invite.sso?.length ? companyButtons(invite.sso, invite.orgId, { hint: invite.email, invite: params.token }) : socialButtons(cfg.providers, params.token),
+      invite.password !== false
+        ? [
+            invite.sso?.length ? h('div', { class: 'divider' }, h('span', {}, 'or create a password')) : null,
+            form(
+              async (data) => finish((await post(`/api/invites/${params.token}/accept`, data)).token),
+              field('Your name', h('input', { name: 'name', required: true, maxlength: 80, autocomplete: 'name' })),
+              field('Create a password', h('input', { name: 'password', type: 'password', required: true, minlength: 8, autocomplete: 'new-password' })),
+              button('Accept invite', { type: 'submit', variant: 'primary', size: 'block' }),
+            ),
+          ]
+        : h('p', { class: 'muted small' }, `${invite.orgName} signs in with ${invite.sso.map((p) => p.label).join(' or ')}: accept the invite with your work account.`),
     ),
   );
 }

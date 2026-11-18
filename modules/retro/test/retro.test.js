@@ -136,7 +136,7 @@ test('dashboard: latest results, team health and admin housekeeping', async () =
 
   let dash = (await call('GET', '/api/dashboard', null, admin)).data;
   assert.deepEqual(dash.retro.results, []);
-  assert.deepEqual(dash.admin.onboarding, { teams: false, people: true, board: true, sprint: true, finished: false, appearance: false });
+  assert.deepEqual(dash.admin.onboarding, { teams: false, people: true, board: true, sprint: true, finished: false });
   assert.equal(dash.admin.pendingInvites, 0); // bia already accepted
   assert.equal((await call('GET', '/api/dashboard', null, bia)).data.admin, null);
 
