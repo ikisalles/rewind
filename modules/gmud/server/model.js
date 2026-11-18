@@ -46,6 +46,8 @@ export const DEFAULT_SETTINGS = {
   // Nobody and no team listed = any admin.
   approvers: { technical: [], change: [], security: [] },
   approverTeams: { technical: [], change: [], security: [] },
+  // owners: may delete any change, in any status (admins always can)
+  owners: { people: [], teams: [] },
   rules: {
     technical: true, // always required
     changeEnvironments: ['production'], // change approver needed in these environments...
@@ -240,6 +242,10 @@ export function cleanSettings(d = {}, current = DEFAULT_SETTINGS) {
   return {
     approvers,
     approverTeams,
+    owners: {
+      people: list(d.owners?.people ?? current.owners?.people ?? [], 50, 60),
+      teams: list(d.owners?.teams ?? current.owners?.teams ?? [], 50, 60),
+    },
     rules: {
       technical: rules.technical !== false && rules.technical !== 'false',
       changeEnvironments: list(rules.changeEnvironments).filter((e) => ENVIRONMENTS.includes(e)),
@@ -279,6 +285,10 @@ export function canDecideRole(settings, role, user) {
   if (!people.length && !teams.length) return user.role === 'admin';
   return people.includes(user.id) || (user.teamIds || []).some((t) => teams.includes(t));
 }
+
+// Owners of the company's changes: admins, plus the people and groups (teams) listed in the settings.
+export const isOwner = (settings, user) =>
+  user.role === 'admin' || (settings.owners?.people || []).includes(user.id) || (user.teamIds || []).some((t) => (settings.owners?.teams || []).includes(t));
 
 // Roles this person may decide on for this change (not yet decided).
 export function rolesFor(change, user, settings) {

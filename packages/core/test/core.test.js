@@ -300,3 +300,207 @@ test('module system: admins turn optional modules on and off per company', async
   const dash = (await call('GET', '/api/dashboard', null, bia)).data;
   assert.deepEqual([dash.modules, dash.extra, dash.later], [['base', 'later'], undefined, { id: 'later' }]);
 });
+
+test('company sign-in: own OIDC / Google credentials, scoped to the company, SSO required with notices', async () => {
+  const realFetch = globalThis.fetch;
+  const seen = { tokenBodies: [], emails: [] };
+  let profile;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u === 'https://idp.acme.io/.well-known/openid-configuration') return Response.json({ authorization_endpoint: 'https://idp.acme.io/authorize', token_endpoint: 'https://idp.acme.io/token', userinfo_endpoint: 'https://idp.acme.io/userinfo' });
+    if (u === 'https://idp.acme.io/token' || u.includes('oauth2.googleapis.com/token')) {
+      seen.tokenBodies.push(Object.fromEntries(new URLSearchParams(String(init.body))));
+      return Response.json({ access_token: 'x' });
+    }
+    if (u === 'https://idp.acme.io/userinfo' || u.includes('openidconnect.googleapis.com')) return Response.json(profile);
+    if (u.includes('api.resend.com')) {
+      seen.emails.push(JSON.parse(init.body));
+      return Response.json({ id: 'e' });
+    }
+    throw new Error('unexpected ' + u);
+  };
+  try {
+    // the platform also offers Google with its own credentials
+    const { call, app } = setup({ GOOGLE_CLIENT_ID: 'platform-id', GOOGLE_CLIENT_SECRET: 'platform-secret', SECRETS_KEY: 'k', RESEND_API_KEY: 'r', EMAIL_FROM: 'Rewind <r@x.io>' });
+    const { admin, bia, me } = await signupCompany(call); // ACME: Ana (admin), Bia (member), both with passwords
+    const other = (await call('POST', '/api/auth/signup', { orgName: 'Other', name: 'Olga', email: 'olga@other.io', password: 'strong-pass' })).data.token;
+
+    const flow = async (provider, org, p, invite) => {
+      profile = p;
+      const qs = new URLSearchParams({ ...(org ? { org } : {}), ...(invite ? { invite } : {}) });
+      const start = await app.fetch(new Request(`https://rewind.test/api/auth/oauth/${provider}/start?${qs}`));
+      const loc = new URL(start.headers.get('location'));
+      const state = loc.searchParams.get('state');
+      const cb = await app.fetch(new Request(`https://rewind.test/api/auth/oauth/${provider}/callback?code=c&state=${state}`));
+      const back = new URLSearchParams(cb.headers.get('location').split('?')[1]);
+      if (back.get('error')) return { error: back.get('error'), authorize: loc };
+      return { ...(await call('POST', '/api/auth/exchange', { code: back.get('code') })).data, authorize: loc };
+    };
+    const oidcUser = (email, name, groups = []) => ({ sub: email, email, email_verified: true, name, groups });
+
+    // admins only; the issuer must answer OpenID discovery; secrets never come back
+    assert.equal((await call('PUT', '/api/org/auth/providers/oidc', { clientId: 'acme-app', clientSecret: 'acme-secret', issuer: 'https://idp.acme.io' }, bia)).status, 403);
+    assert.equal((await call('PUT', '/api/org/auth/providers/oidc', { clientId: 'a', clientSecret: 'b', issuer: 'http://idp.acme.io' }, admin)).status, 400);
+    const saved = await call('PUT', '/api/org/auth/providers/oidc', { clientId: 'acme-app', clientSecret: 'acme-secret-1234', issuer: 'https://idp.acme.io/', label: 'Okta' }, admin);
+    assert.equal(saved.status, 200);
+    assert.equal(JSON.stringify(saved.data).includes('acme-secret'), false);
+    assert.deepEqual([saved.data.auth.providers.oidc.hasSecret, saved.data.auth.providers.oidc.secretHint, saved.data.ready], [true, '…1234', [{ id: 'oidc', label: 'Okta' }]]);
+    const view = (await call('GET', '/api/org/auth', null, admin)).data;
+    assert.equal(view.redirectUris.oidc, 'https://rewind.test/api/auth/oauth/oidc/callback');
+    assert.deepEqual(view.platform.map((p) => p.id), ['google']);
+
+    // domains: valid, not public, not another company's
+    assert.equal((await call('PUT', '/api/org/auth/policy', { domains: ['gmail.com'] }, admin)).status, 400);
+    assert.equal((await call('PUT', '/api/org/auth/policy', { domains: ['other.io'] }, other)).status, 200);
+    assert.equal((await call('PUT', '/api/org/auth/policy', { domains: ['other.io'] }, admin)).status, 409);
+    await call('PUT', '/api/org/auth/policy', { domains: ['acme.io'] }, admin);
+
+    // discovery: the email leads to the company and its sign-in
+    const d = (await call('POST', '/api/auth/discover', { email: 'bia@acme.io' })).data;
+    assert.deepEqual([d.org.name, d.sso, d.password], ['ACME', [{ id: 'oidc', label: 'Okta' }], true]);
+    assert.deepEqual((await call('POST', '/api/auth/discover', { email: 'new@acme.io' })).data.sso, [{ id: 'oidc', label: 'Okta' }]);
+    assert.deepEqual((await call('POST', '/api/auth/discover', { email: 'x@nowhere.io' })).data, { org: null, sso: [], password: true });
+
+    // existing member through the company IdP, with the company's credentials (not the platform's)
+    const biaSso = await flow('oidc', me.org.id, oidcUser('bia@acme.io', 'Bia'));
+    assert.equal(biaSso.authorize.origin + biaSso.authorize.pathname, 'https://idp.acme.io/authorize');
+    assert.equal(biaSso.authorize.searchParams.get('client_id'), 'acme-app');
+    assert.deepEqual([seen.tokenBodies.at(-1).client_id, seen.tokenBodies.at(-1).client_secret], ['acme-app', 'acme-secret-1234']);
+    const biaMe = (await call('GET', '/api/me', null, biaSso.token)).data;
+    assert.deepEqual([biaMe.org.id, biaMe.user.email, biaMe.user.providers.includes('oidc')], [me.org.id, 'bia@acme.io', true]);
+    assert.deepEqual(biaMe.managedBy, ['Okta']); // shown in My account: the account comes from Okta
+
+    // new person of the domain: account in ACME (never a new company), groups → teams
+    const cara = await flow('oidc', me.org.id, oidcUser('cara@acme.io', 'Cara', ['platform-team']));
+    const caraMe = (await call('GET', '/api/me', null, cara.token)).data;
+    assert.deepEqual([caraMe.org.id, caraMe.user.role], [me.org.id, 'member']);
+    assert.ok(caraMe.teams.some((t) => t.name === 'platform-team'));
+    // outside the company's domains, or someone from another company: refused
+    assert.match((await flow('oidc', me.org.id, oidcUser('eve@evil.io', 'Eve'))).error, /Ask an admin for an invite/);
+    assert.match((await flow('oidc', me.org.id, oidcUser('olga@other.io', 'Olga'))).error, /another company/);
+
+    // a company's own Google app works the same way; the platform's Google still works for others
+    await call('PUT', '/api/org/auth/providers/google', { clientId: 'acme-google', clientSecret: 'acme-g-secret' }, admin);
+    const viaGoogle = await flow('google', me.org.id, { sub: 'b', email: 'bia@acme.io', email_verified: true, name: 'Bia', hd: 'acme.io' });
+    assert.equal(viaGoogle.authorize.searchParams.get('client_id'), 'acme-google');
+    assert.ok(viaGoogle.token);
+    const platform = await flow('google', null, { sub: 'z', email: 'zoe@zeta.io', email_verified: true, name: 'Zoe', hd: 'zeta.io' });
+    assert.equal(platform.authorize.searchParams.get('client_id'), 'platform-id');
+    assert.ok(platform.token);
+
+    // requiring SSO: everyone is told (email + notice); members can't use passwords, admins can
+    seen.emails.length = 0;
+    const policy = await call('PUT', '/api/org/auth/policy', { domains: ['acme.io'], requireSso: true }, admin);
+    assert.deepEqual(policy.data.notified, { people: 3, emailed: 3, emailEnabled: true });
+    assert.deepEqual(seen.emails.map((e) => e.to).sort(), ['ana@acme.io', 'bia@acme.io', 'cara@acme.io']);
+    assert.match(seen.emails.find((e) => e.to === 'bia@acme.io').html, /no longer works/);
+    assert.doesNotMatch(seen.emails.find((e) => e.to === 'ana@acme.io').html, /no longer works/); // admins keep the password
+    const notice = (await call('GET', '/api/me', null, bia)).data.user.notice;
+    assert.deepEqual([notice.type, notice.required, notice.providers], ['signin', true, ['Google', 'Okta']]);
+
+    const pw = await call('POST', '/api/auth/login', { email: 'bia@acme.io', password: '12345678' });
+    assert.deepEqual([pw.status, pw.data.code], [403, 'sso_required']);
+    assert.match(pw.data.error, /Google or Okta/);
+    assert.equal((await call('POST', '/api/auth/login', { email: 'ana@acme.io', password: 'strong-pass' })).status, 200);
+    assert.equal((await call('POST', '/api/auth/discover', { email: 'bia@acme.io' })).data.password, false);
+    // the platform's Google is no longer accepted for ACME members; the company's is
+    assert.match((await flow('google', null, { sub: 'b', email: 'bia@acme.io', email_verified: true, name: 'Bia', hd: 'acme.io' })).error, /signs in with/);
+    const again = await flow('oidc', me.org.id, oidcUser('bia@acme.io', 'Bia Souza'));
+    assert.equal((await call('GET', '/api/me', null, again.token)).data.user.name, 'Bia Souza'); // the provider owns the name
+    assert.equal((await call('GET', '/api/me', null, again.token)).data.user.notice ?? null, null); // signing in the new way clears it
+    assert.equal((await call('DELETE', '/api/me/notice', null, cara.token)).status, 200);
+    assert.equal((await call('GET', '/api/me', null, cara.token)).data.user.notice ?? null, null);
+
+    // invites: no password route for members while SSO is required; the invite says how
+    const inv = (await call('POST', '/api/invites', { email: 'dan@acme.io', teamId: me.org.defaultTeamId }, admin)).data.invites[0];
+    const look = (await call('GET', `/api/invites/${inv.token}`)).data;
+    assert.deepEqual([look.password, look.sso.map((p) => p.id), look.orgId], [false, ['google', 'oidc'], me.org.id]);
+    assert.equal((await call('POST', `/api/invites/${inv.token}/accept`, { name: 'Dan', password: 'strong-pass' })).data.code, 'sso_required');
+    const dan = await flow('oidc', me.org.id, oidcUser('dan@acme.io', 'Dan'), inv.token);
+    assert.ok(dan.token);
+
+    // removing the last provider never locks people out
+    await call('DELETE', '/api/org/auth/providers/google', null, admin);
+    const last = await call('DELETE', '/api/org/auth/providers/oidc', null, admin);
+    assert.equal(last.data.auth.requireSso, false);
+    assert.equal((await call('POST', '/api/auth/login', { email: 'bia@acme.io', password: '12345678' })).status, 200);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('themes are personal: each person saves their own, the company has none', async () => {
+  const { call } = setup();
+  const { admin, bia } = await signupCompany(call);
+  assert.equal((await call('PATCH', '/api/me', { theme: 'neon' }, bia)).status, 400);
+  assert.equal((await call('PATCH', '/api/me', { theme: 'light' }, bia)).data.user.theme, 'light');
+  assert.equal((await call('PATCH', '/api/me', { theme: 'ocean' }, admin)).data.user.theme, 'ocean');
+  assert.equal((await call('GET', '/api/me', null, bia)).data.user.theme, 'light');
+  assert.equal((await call('GET', '/api/me', null, admin)).data.user.theme, 'ocean');
+  // the company no longer stores colors
+  await call('PATCH', '/api/org', { theme: { accent: '#ff0000' } }, admin);
+  assert.equal((await call('GET', '/api/me', null, admin)).data.org.theme?.accent, undefined);
+});
+
+test('company logo: fetched from the company site when a sign-in is connected, shown only then', async () => {
+  const { iconLinks } = await import('../src/lib/logo.js');
+  assert.deepEqual(
+    iconLinks('<head><link rel="icon" href="/fav.ico"><link rel="apple-touch-icon" href="/touch.png"><link rel="icon" sizes="32x32 192x192" href="https://cdn.acme.io/i192.png"><link rel="stylesheet" href="/x.css"></head>', 'https://acme.io/'),
+    ['https://cdn.acme.io/i192.png', 'https://acme.io/touch.png', 'https://acme.io/fav.ico'],
+  );
+
+  const realFetch = globalThis.fetch;
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]);
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    seen.push(u);
+    if (u === 'https://idp.acme.io/.well-known/openid-configuration') return Response.json({ authorization_endpoint: 'https://idp.acme.io/a', token_endpoint: 'https://idp.acme.io/t', userinfo_endpoint: 'https://idp.acme.io/u' });
+    if (u === 'https://acme.io/') return new Response('<html><head><link rel="apple-touch-icon" href="/touch.png"></head></html>', { headers: { 'content-type': 'text/html' } });
+    if (u === 'https://acme.io/touch.png') return new Response(png, { headers: { 'content-type': 'image/png' } });
+    if (u === 'https://nologo.io/') return new Response('<html></html>', { headers: { 'content-type': 'text/html' } });
+    if (u.startsWith('https://nologo.io/')) return new Response('nope', { status: 404 });
+    throw new Error('unexpected ' + u);
+  };
+  try {
+    const { call, app, storage } = setup({ SECRETS_KEY: 'k' });
+    const { admin, bia, me: first } = await signupCompany(call);
+    // no sign-in connected: no logo, and refreshing is refused
+    assert.equal((await call('GET', '/api/me', null, admin)).data.org.logo, null);
+    assert.equal((await call('POST', '/api/org/logo/refresh', {}, admin)).status, 400);
+
+    // connecting the company's sign-in with its domain brings the logo from acme.io
+    await call('PUT', '/api/org/auth/providers/oidc', { clientId: 'a', clientSecret: 'b', issuer: 'https://idp.acme.io' }, admin);
+    await call('PUT', '/api/org/auth/policy', { domains: ['acme.io'] }, admin);
+    const logo = (await call('GET', '/api/me', null, bia)).data.org.logo;
+    assert.equal(logo.from, 'https://acme.io/touch.png');
+    assert.match(logo.url, new RegExp(`^/api/orgs/${first.org.id}/logo\\?v=`));
+    // the image lives apart from the company record, served by its own cacheable URL (no session needed)
+    assert.equal(JSON.stringify(await storage.get(`org:${first.org.id}`)).includes('base64'), false);
+    const img = await app.fetch(new Request(`https://rewind.test${logo.url}`));
+    assert.deepEqual([img.status, img.headers.get('content-type'), img.headers.get('cache-control')], [200, 'image/png', 'public, max-age=31536000, immutable']);
+    assert.deepEqual([...new Uint8Array(await img.arrayBuffer())], [...png]);
+    assert.equal((await app.fetch(new Request('https://rewind.test/api/orgs/nope/logo'))).status, 404);
+    assert.equal((await call('GET', '/api/me', null, bia)).status, 200); // other API answers stay no-store
+
+    // removed by an admin: gone, and not fetched back on its own
+    assert.equal((await call('DELETE', '/api/org/logo', null, bia)).status, 403);
+    await call('DELETE', '/api/org/logo', null, admin);
+    await call('PUT', '/api/org/auth/policy', { domains: ['acme.io'] }, admin);
+    assert.equal((await call('GET', '/api/me', null, admin)).data.org.logo, null);
+    assert.ok((await call('POST', '/api/org/logo/refresh', {}, admin)).data.logo.url);
+
+    // the sign-in goes away: the logo isn't shown anymore
+    await call('DELETE', '/api/org/auth/providers/oidc', null, admin);
+    assert.equal((await call('GET', '/api/me', null, admin)).data.org.logo, null);
+
+    // a site without icons
+    await call('PUT', '/api/org/auth/providers/oidc', { clientId: 'a', clientSecret: 'b', issuer: 'https://idp.acme.io' }, admin);
+    await call('PUT', '/api/org/auth/policy', { domains: ['nologo.io'] }, admin);
+    await call('DELETE', '/api/org/logo', null, admin);
+    assert.equal((await call('POST', '/api/org/logo/refresh', {}, admin)).status, 404);
+    assert.ok(seen.every((u) => u.startsWith('https://'))); // only https, only the company's own hosts (plus its IdP)
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

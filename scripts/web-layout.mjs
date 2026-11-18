@@ -45,17 +45,21 @@ export function webMounts() {
   return mounts;
 }
 
-export function importMap(mounts = webMounts()) {
-  const imports = { '@rewind/web/': './assets/js/' };
-  for (const m of mounts) if (m.prefix !== '/') imports[`${m.name}/`] = `.${m.prefix}`;
+// base: where the files live relative to index.html ('./' in development, './_v/<hash>/' in builds)
+export function importMap(mounts = webMounts(), base = './') {
+  const imports = { '@rewind/web/': `${base}assets/js/` };
+  for (const m of mounts) if (m.prefix !== '/') imports[`${m.name}/`] = `${base}${m.prefix.slice(1)}`;
   return { imports };
 }
 
 // index.html carries a placeholder that becomes the import map.
-export function renderIndex(html, mounts = webMounts()) {
-  const tag = `<script type="importmap">${JSON.stringify(importMap(mounts))}</script>`;
+// base: see importMap(); in builds the stylesheet and the entry script move under it too.
+export function renderIndex(html, mounts = webMounts(), base = './') {
+  const tag = `<script type="importmap">${JSON.stringify(importMap(mounts, base))}</script>`;
   if (!html.includes('<!-- rewind:importmap -->')) throw new Error('index.html is missing <!-- rewind:importmap -->');
-  return html.replace('<!-- rewind:importmap -->', tag);
+  const out = html.replace('<!-- rewind:importmap -->', tag);
+  if (base === './') return out;
+  return out.replace('href="assets/styles.css"', `href="${base}assets/styles.css"`).replace('src="assets/js/main.js"', `src="${base}assets/js/main.js"`);
 }
 
 // Maps a URL path to a file on disk (or null when outside every mount).

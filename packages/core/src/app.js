@@ -10,21 +10,23 @@
 
 import { createRouter, corsHeaders, fail, HttpError, json, readJson, redirect } from './lib/http.js';
 import { hashPassword, newId, openSecret, randomToken, sealSecret, verifyPassword } from './lib/crypto.js';
-import { authorizeUrl, enabledProviders, exchangeCode, PROVIDERS, PUBLIC_DOMAINS } from './auth/providers.js';
-import { escapeHtml, isColor, isEmail, normalizeOrgName, now, str } from './util.js';
+import { authorizeUrl, enabledProviders, exchangeCode, labelOf, PROVIDERS, PUBLIC_DOMAINS } from './auth/providers.js';
+import { escapeHtml, isEmail, normalizeOrgName, now, str } from './util.js';
 import { readYourWrites } from './storage/consistency.js';
+import { fetchCompanyLogo } from './lib/logo.js';
 
 // Core keys that should exist when looked up (a token someone holds, an id from a link...):
 // on an eventually consistent store, a miss on them is read again before giving up.
 // On Durable Object storage: company data lives in the company's object (keys "<kind>:<orgId>:...").
-export const CORE_SHARDS = { user: 'org', team: 'org', inviteidx: 'org', joinreq: 'org', integration: 'org' };
+export const CORE_SHARDS = { user: 'org', team: 'org', inviteidx: 'org', joinreq: 'org', integration: 'org', orgauth: 'org', orglogo: 'org' };
 
 const CORE_KEY_PREFIXES = ['session:', 'authcode:', 'oauth:', 'user:', 'org:', 'cred:', 'team:', 'invite:'];
 
 const SESSION_TTL = 60 * 60 * 24 * 30; // 30 days
 const INVITE_TTL = 60 * 60 * 24 * 14; // 14 days
 
-const THEME_KEYS = ['bg', 'surface', 'surface2', 'border', 'text', 'muted', 'accent', 'accentText', 'success', 'danger', 'link'];
+// Each person picks their own theme (My account → Appearance).
+const THEMES = ['dark', 'light', 'ocean'];
 
 // consistency: 'strong' (default) or 'eventual' for stores whose reads may lag behind writes
 // (e.g. Azion SQL Database read replicas): turns on read-your-writes, see storage/consistency.js.
@@ -60,6 +62,9 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     joinRequests: (orgId) => `joinreq:${orgId}:`,
     joinRequestEmail: (email) => `joinreqemail:${email}`,
     integrations: (orgId, userId) => `integration:${orgId}:${userId}`,
+    orgAuth: (orgId) => `orgauth:${orgId}`,
+    orgLogo: (orgId) => `orglogo:${orgId}`, // the image itself, apart from the company record
+    ssoDomain: (domain) => `ssodomain:${domain}`,
   };
 
   const appUrl = (req) => (env.APP_URL || new URL(req.url).origin).replace(/\/$/, '');
@@ -180,20 +185,58 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
   }
 
   // Map provider groups to teams (creating them on first sight).
+  // Groups from the company's identity provider become teams. A group never duplicates a team that
+  // already exists in Rewind with the same name (ignoring case, accents and spaces): that team is
+  // linked to the group instead. Duplicates made before this rule are merged into the older team.
+  const sameName = (a, b) => normalizeOrgName(a || '') === normalizeOrgName(b || '');
   async function teamsForGroups(org, groups) {
     if (!groups?.length) return [];
-    const teams = await db.list(K.teams(org.id));
+    let teams = await db.list(K.teams(org.id));
     const ids = [];
     for (const g of groups) {
+      const name = g.name || g.key;
       let team = teams.find((t) => t.groupKey === g.key);
-      if (!team) {
-        team = { id: newId(), orgId: org.id, name: g.name || g.key, groupKey: g.key, createdAt: now() };
+      const manual = teams.find((t) => !t.groupKey && t.id !== team?.id && sameName(t.name, name));
+      if (team && manual) {
+        // an earlier duplicate: keep the older team (its boards, links and history), linked to the group
+        // ids are time-ordered: they break ties between teams created in the same millisecond
+        const older = (a, b) => `${a.createdAt}|${a.id}` <= `${b.createdAt}|${b.id}`;
+        const [keep, drop] = older(manual, team) ? [manual, team] : [team, manual];
+        keep.groupKey = g.key;
+        await db.patch(K.team(org.id, keep.id), { groupKey: g.key });
+        await mergeTeams(org.id, drop.id, keep.id);
+        teams = teams.filter((t) => t.id !== drop.id);
+        team = keep;
+      } else if (!team && manual) {
+        manual.groupKey = g.key; // the team made in Rewind now follows the group
+        await db.patch(K.team(org.id, manual.id), { groupKey: g.key });
+        team = manual;
+      } else if (!team) {
+        team = { id: newId(), orgId: org.id, name, groupKey: g.key, createdAt: now() };
         await db.put(K.team(org.id, team.id), team);
         teams.push(team);
       }
       ids.push(team.id);
     }
-    return ids;
+    return [...new Set(ids)];
+  }
+
+  // Everything that pointed to one team moves to another, then the first one is deleted:
+  // members, default team, pending invites, and each module's data (boards, changes...).
+  async function mergeTeams(orgId, fromId, intoId) {
+    if (fromId === intoId) return;
+    for (const u of await db.list(K.users(orgId))) {
+      if (!u.teamIds.includes(fromId)) continue;
+      await db.patch(K.user(orgId, u.id), { teamIds: [...new Set(u.teamIds.map((t) => (t === fromId ? intoId : t)))] });
+    }
+    const org = await db.get(K.org(orgId));
+    if (org?.defaultTeamId === fromId) await db.patch(K.org(orgId), { defaultTeamId: intoId });
+    for (const idx of await db.list(K.invites(orgId))) {
+      const invite = await db.get(K.invite(idx.token));
+      if (invite?.teamId === fromId) await db.patch(K.invite(idx.token), { teamId: intoId });
+    }
+    for (const m of loaded) await m.onTeamMerge?.(orgId, fromId, intoId);
+    await db.delete(K.team(orgId, fromId));
   }
 
 
@@ -223,7 +266,89 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     });
 
 
+  // ------------------------------------------------------------ company sign-in (SSO / social)
+  // A company can bring its own sign-in: Google, Microsoft, GitHub or any OpenID Connect provider,
+  // with its own client ID and secret (Company settings → Sign-in). Without it, the platform's
+  // providers (environment variables) are used. Secrets are stored sealed (SECRETS_KEY).
+  const COMPANY_PROVIDERS = ['google', 'microsoft', 'github', 'oidc'];
+  const emptyAuth = () => ({ providers: {}, domains: [], requireSso: false, autoProvision: true, notifiedAt: null });
+  const orgAuth = async (orgId) => ({ ...emptyAuth(), ...((orgId && (await db.get(K.orgAuth(orgId)))) || {}) });
+  const companyDomains = (org, auth) => [...new Set([org?.domain, ...(auth.domains || [])].filter(Boolean))];
+  const readyProviders = (auth) =>
+    COMPANY_PROVIDERS.filter((id) => auth.providers[id]?.enabled && auth.providers[id].clientId && auth.providers[id].clientSecret && (id !== 'oidc' || auth.providers[id].issuer))
+      .map((id) => ({ id, label: labelOf(id, auth.providers[id]) }));
+
+  // what the admin sees: everything but the secrets
+  const authView = (auth) => ({
+    ...auth,
+    providers: Object.fromEntries(Object.entries(auth.providers).map(([id, { clientSecret, ...rest }]) => [id, { ...rest, hasSecret: Boolean(clientSecret) }])),
+  });
+
+  // Credentials for a sign-in: the company's when it has them, the platform's otherwise.
+  async function providerConfig(id, orgId) {
+    if (orgId) {
+      const p = (await orgAuth(orgId)).providers[id];
+      if (!p?.enabled || !p.clientSecret) fail(404, 'This company has no such sign-in');
+      return { ...p, clientSecret: await openSecret(p.clientSecret, env.SECRETS_KEY) };
+    }
+    const cfg = PROVIDERS[id]?.fromEnv(env);
+    if (!cfg) fail(404, 'Provider not enabled');
+    return cfg;
+  }
+
+  // The company behind an email: its account, or a domain the company signs in with.
+  async function orgForEmail(email) {
+    const user = await findUserByEmail(email);
+    if (user) return { org: await db.get(K.org(user.orgId)), user };
+    const domain = email.split('@')[1] || '';
+    const ref = (await db.get(K.ssoDomain(domain))) || (await db.get(K.orgDomain(domain)));
+    return { org: ref ? await db.get(K.org(ref.orgId)) : null, user: null };
+  }
+
+  // The company's logo (header chip) comes from its own website, through the domain its sign-in
+  // uses. It only shows while the company has a sign-in connected (social domain or own provider).
+  const signInConnected = (org, auth) => Boolean(org?.domain) || readyProviders(auth).length > 0;
+  // The image is stored apart (orglogo:<id>) and served by its own cacheable URL; the company record
+  // only keeps where it came from and when, so the image never travels with every request.
+  async function refreshLogo(org, auth, { force = false } = {}) {
+    if (!force && (org.logo || org.logoRemoved)) return org.logo || null;
+    const domain = org.domain || auth.domains?.[0];
+    const found = domain ? await fetchCompanyLogo(domain).catch(() => null) : null;
+    const logo = found ? { from: found.from, domain, at: now() } : null;
+    if (found) await db.put(K.orgLogo(org.id), { dataUrl: found.dataUrl });
+    else await db.delete(K.orgLogo(org.id));
+    org.logo = logo;
+    await db.patch(K.org(org.id), { logo, logoRemoved: null });
+    return logo;
+  }
+  const logoUrl = (org) => `/api/orgs/${org.id}/logo?v=${encodeURIComponent(org.logo.at)}`;
+  // what people get: the URL of the image, only while a sign-in is connected
+  const publicLogo = (org, auth) => (org.logo && signInConnected(org, auth) ? { url: logoUrl(org), from: org.logo.from, at: org.logo.at } : null);
+
+  // Companies whose logo was saved inside the company record (before it moved apart).
+  async function moveInlineLogo(org) {
+    if (!org.logo?.dataUrl) return;
+    const { dataUrl, ...meta } = org.logo;
+    await db.put(K.orgLogo(org.id), { dataUrl });
+    org.logo = meta;
+    await db.patch(K.org(org.id), { logo: { dataUrl: null } });
+  }
+
+  const ssoRequired = (auth, user) => auth.requireSso && readyProviders(auth).length > 0 && user?.role !== 'admin';
+  const ssoRequiredError = (org, auth) =>
+    fail(403, `${org.name} signs in with ${readyProviders(auth).map((p) => p.label).join(' or ')}. Use that button with your work account.`, 'sso_required');
+
   // ------------------------------------------------------------ public
+  route('POST', '/api/auth/discover', async ({ body }) => {
+    const email = str(body.email, 200).toLowerCase();
+    if (!isEmail(email)) fail(400, 'Enter a valid email');
+    const { org, user } = await orgForEmail(email);
+    if (!org) return json({ org: null, sso: [], password: true });
+    const auth = await orgAuth(org.id);
+    const sso = readyProviders(auth);
+    return json({ org: { id: org.id, name: org.name }, sso, password: !ssoRequired(auth, user || { role: 'member' }) });
+  }, { public: true });
+
   route('GET', '/api/config', async () =>
     json({
       providers: enabledProviders(env),
@@ -300,6 +425,10 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
         fail(403, jr.status === 'pending' ? pendingMessage(org?.name || jr.orgName) : deniedMessage(org?.name || jr.orgName));
       }
     }
+    if (user) {
+      const auth = await orgAuth(user.orgId);
+      if (ssoRequired(auth, user)) ssoRequiredError(await db.get(K.org(user.orgId)), auth);
+    }
     const cred = user && (await db.get(K.cred(user.id)));
     if (!cred || !(await verifyPassword(String(body.password || ''), cred.hash))) {
       fail(401, 'Wrong email or password');
@@ -315,16 +444,21 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     return json({ token: entry.token });
   }, { public: true });
 
+  // ?org=<id>: sign in with that company's own provider (Company settings → Sign-in)
   route('GET', '/api/auth/oauth/:provider/start', async ({ req, params, url }) => {
-    if (!PROVIDERS[params.provider]?.enabled(env)) fail(404, 'Provider not enabled');
+    if (!PROVIDERS[params.provider]) fail(404, 'Provider not enabled');
+    const orgId = str(url.searchParams.get('org'), 60) || null;
+    const cfg = await providerConfig(params.provider, orgId);
     const state = randomToken(24);
-    await db.put(K.oauthState(state), { provider: params.provider, invite: url.searchParams.get('invite') }, { ttl: 600 });
-    return redirect(
-      authorizeUrl(params.provider, env, {
-        state,
-        redirectUri: `${apiUrl(req)}/api/auth/oauth/${params.provider}/callback`,
-      }),
-    );
+    await db.put(K.oauthState(state), { provider: params.provider, orgId, invite: url.searchParams.get('invite') }, { ttl: 600 });
+    const hint = str(url.searchParams.get('hint'), 200);
+    let target;
+    try {
+      target = await authorizeUrl(params.provider, cfg, { state, loginHint: isEmail(hint) ? hint : '', redirectUri: `${apiUrl(req)}/api/auth/oauth/${params.provider}/callback` });
+    } catch {
+      fail(502, "Couldn't reach the company's identity provider");
+    }
+    return redirect(target);
   }, { public: true });
 
   route('GET', '/api/auth/oauth/:provider/callback', async ({ req, params, url }) => {
@@ -337,7 +471,8 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
 
     let profile;
     try {
-      profile = await exchangeCode(params.provider, env, {
+      const cfg = await providerConfig(params.provider, saved.orgId);
+      profile = await exchangeCode(params.provider, cfg, {
         code: url.searchParams.get('code'),
         redirectUri: `${apiUrl(req)}/api/auth/oauth/${params.provider}/callback`,
       });
@@ -345,7 +480,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
       return back({ error: "Couldn't authenticate with the provider" });
     }
     try {
-      const user = await socialLogin(profile, saved.invite);
+      const user = await socialLogin(profile, saved.invite, saved.orgId || null);
       const code = randomToken(24);
       await db.put(K.authCode(code), { token: await createSession(user) }, { ttl: 120 });
       return back({ code });
@@ -356,7 +491,8 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
   }, { public: true });
 
   // The heart of social sign-in: decides which company and team(s) a person joins.
-  async function socialLogin(profile, inviteToken) {
+  // viaOrg: the sign-in used that company's own provider; it can only ever lead into that company.
+  async function socialLogin(profile, inviteToken, viaOrg = null) {
     if (!isEmail(profile.email) || !profile.emailVerified) fail(403, "The provider didn't return a verified email");
     const linkProvider = (u) => {
       if (!u.providers.includes(profile.provider)) u.providers.push(profile.provider);
@@ -366,11 +502,19 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     // 1. Returning user: refresh group-based teams.
     const existing = await findUserByEmail(profile.email);
     if (existing) {
+      if (viaOrg && existing.orgId !== viaOrg) fail(403, 'This account belongs to another company on Rewind. Sign in from its page.');
       const org = await db.get(K.org(existing.orgId));
+      // a company that requires its own sign-in doesn't accept the platform's providers
+      const auth = await orgAuth(org.id);
+      if (!viaOrg && ssoRequired(auth, existing)) ssoRequiredError(org, auth);
       const groupTeams = await teamsForGroups(org, profile.groups);
       existing.teamIds = [...new Set([...existing.teamIds, ...groupTeams])];
       linkProvider(existing);
-      await db.patch(K.user(org.id, existing.id), { teamIds: existing.teamIds, providers: existing.providers, avatar: existing.avatar });
+      // signing in the company's way answers the "how to sign in now" notice
+      if (viaOrg && existing.notice?.type === 'signin') existing.notice = null;
+      // the provider owns the person's name: keep it in step
+      if (profile.name && profile.name !== profile.email) existing.name = str(profile.name, 80) || existing.name;
+      await db.patch(K.user(org.id, existing.id), { name: existing.name, teamIds: existing.teamIds, providers: existing.providers, avatar: existing.avatar, notice: existing.notice ?? null });
       return existing;
     }
 
@@ -387,6 +531,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
       const invite = await db.get(K.invite(inviteToken));
       if (!invite) fail(400, 'Invalid or expired invite');
       if (invite.email !== profile.email) fail(403, `This invite was sent to ${invite.email}`);
+      if (viaOrg && invite.orgId !== viaOrg) fail(403, 'This invite is for another company');
       const org = await db.get(K.org(invite.orgId));
       const groupTeams = await teamsForGroups(org, profile.groups);
       const user = await createUser(org, {
@@ -405,6 +550,20 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
 
     const domain = profile.domain;
     const companyDomain = domain && !PUBLIC_DOMAINS.has(domain) ? domain : null;
+
+    // 3a. Company sign-in: new people from the company's domains get an account there, nothing else.
+    if (viaOrg) {
+      const org = await db.get(K.org(viaOrg));
+      const auth = await orgAuth(viaOrg);
+      if (!org) fail(404, 'Company not found');
+      if (joinReq?.status === 'denied' && joinReq.orgId === org.id) fail(403, deniedMessage(org.name));
+      if (!auth.autoProvision || !companyDomains(org, auth).includes(profile.domain)) fail(403, `You don't have access to ${org.name} on Rewind yet. Ask an admin for an invite.`);
+      const groupTeams = await teamsForGroups(org, profile.groups);
+      const user = await createUser(org, { email: profile.email, name: profile.name, avatar: profile.avatar, teamIds: groupTeams.length ? groupTeams : [org.defaultTeamId] });
+      linkProvider(user);
+      await db.put(K.user(org.id, user.id), user);
+      return user;
+    }
 
     // 3. Company already on Rewind.
     if (companyDomain) {
@@ -445,6 +604,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     linkProvider(user);
     // Ask the creator whether colleagues from the same domain may join automatically.
     if (companyDomain) user.onboarding = 'autoJoin';
+    if (companyDomain) await refreshLogo(org, emptyAuth()).catch(() => null); // best effort
     await db.put(K.user(org.id, user.id), user);
     return user;
   }
@@ -455,7 +615,17 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     if (!invite) fail(404, 'Invalid or expired invite');
     const org = await db.get(K.org(invite.orgId));
     const team = invite.teamId && (await db.get(K.team(org.id, invite.teamId)));
-    return json({ email: invite.email, orgName: org.name, teamName: team?.name ?? null, role: invite.role === 'admin' ? 'admin' : 'member' });
+    const auth = await orgAuth(org.id);
+    return json({
+      email: invite.email,
+      orgId: org.id,
+      orgName: org.name,
+      teamName: team?.name ?? null,
+      role: invite.role === 'admin' ? 'admin' : 'member',
+      // the company's own sign-in, and whether a password is still an option
+      sso: readyProviders(auth),
+      password: !ssoRequired(auth, { role: invite.role }),
+    });
   }, { public: true });
 
   route('POST', '/api/invites/:token/accept', async ({ params, body }) => {
@@ -465,6 +635,8 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     if (password.length < 8) fail(400, 'Password must be at least 8 characters');
     if (await findUserByEmail(invite.email)) fail(409, 'This email already has an account. Please sign in.');
     const org = await db.get(K.org(invite.orgId));
+    const inviteAuth = await orgAuth(org.id);
+    if (ssoRequired(inviteAuth, { role: invite.role })) ssoRequiredError(org, inviteAuth);
     const user = await createUser(org, {
       email: invite.email,
       name: str(body.name, 80),
@@ -487,7 +659,12 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
   route('GET', '/api/me', async (c) => {
     const teams = await db.list(K.teams(c.org.id));
     const pendingRequests = isAdmin(c) ? (await pendingJoinRequests(c.org.id)).length : 0;
-    return json({ user: c.user, org: c.org, teams, pendingRequests, modules: enabledModules(c.org).map((m) => m.id) });
+    const auth = await orgAuth(c.org.id);
+    await moveInlineLogo(c.org);
+    const org = { ...c.org, logo: publicLogo(c.org, auth) };
+    // how this person signs in, when a provider manages their account (names of the providers)
+    const managedBy = c.user.providers?.length ? c.user.providers.map((id) => labelOf(id, auth.providers[id])) : [];
+    return json({ user: c.user, org, teams, pendingRequests, managedBy, modules: enabledModules(c.org).map((m) => m.id) });
   });
 
   // ------------------------------------------------------------ join requests (admin)
@@ -545,10 +722,16 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
   });
 
   route('PATCH', '/api/me', async (c) => {
+    const changes = {};
     const name = str(c.body.name, 80);
-    if (name) {
-      c.user.name = name;
-      await db.patch(K.user(c.org.id, c.user.id), { name });
+    if (name) changes.name = name;
+    if (c.body.theme !== undefined) {
+      if (!THEMES.includes(c.body.theme)) fail(400, 'Unknown theme');
+      changes.theme = c.body.theme; // this person's theme only
+    }
+    if (Object.keys(changes).length) {
+      Object.assign(c.user, changes);
+      await db.patch(K.user(c.org.id, c.user.id), changes);
     }
     return json({ user: c.user });
   });
@@ -616,6 +799,176 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     return json({ integrations: integrationView(rest) });
   });
 
+  // ------------------------------------------------------------ notices for one person
+  route('DELETE', '/api/me/notice', async (c) => {
+    await db.patch(K.user(c.org.id, c.user.id), { notice: null });
+    return json({ ok: true });
+  });
+
+  // ------------------------------------------------------------ company logo (admin)
+  route('POST', '/api/org/logo/refresh', async (c) => {
+    requireAdmin(c);
+    const auth = await orgAuth(c.org.id);
+    if (!signInConnected(c.org, auth)) fail(400, 'Connect a sign-in (Company settings → Sign-in & SSO) first: the logo comes from your company domain');
+    if (!c.org.domain && !auth.domains.length) fail(400, 'Add your company email domain in Sign-in & SSO first');
+    const logo = await refreshLogo(c.org, auth, { force: true });
+    if (!logo) fail(404, `No icon found on ${c.org.domain || auth.domains[0]}`);
+    return json({ logo: publicLogo(c.org, auth) });
+  });
+
+  route('DELETE', '/api/org/logo', async (c) => {
+    requireAdmin(c);
+    c.org.logo = null;
+    await db.delete(K.orgLogo(c.org.id));
+    await db.patch(K.org(c.org.id), { logo: null, logoRemoved: true }); // don't fetch it back on its own
+    return json({ logo: null });
+  });
+
+  // The image, by its own URL: public (it's the company's website icon) and cached by browsers;
+  // the ?v= in the URL changes whenever the logo does.
+  route('GET', '/api/orgs/:id/logo', async ({ params }) => {
+    const stored = await db.get(K.orgLogo(params.id));
+    const m = /^data:([\w/+.-]+);base64,(.+)$/.exec(stored?.dataUrl || '');
+    if (!m) return new Response('Not found', { status: 404 });
+    const bytes = Uint8Array.from(atob(m[2]), (ch) => ch.charCodeAt(0));
+    return new Response(bytes, {
+      headers: {
+        'content-type': m[1],
+        'cache-control': 'public, max-age=31536000, immutable',
+        // an SVG shown as a page must not run anything
+        'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        'x-content-type-options': 'nosniff',
+      },
+    });
+  }, { public: true });
+
+  // ------------------------------------------------------------ company sign-in (admin)
+  const cleanDomain = (d) => String(d || '').trim().toLowerCase().replace(/^@/, '');
+  const validDomain = (d) => /^([a-z0-9-]+\.)+[a-z]{2,}$/.test(d);
+
+  route('GET', '/api/org/auth', async (c) => {
+    requireAdmin(c);
+    const auth = await orgAuth(c.org.id);
+    const base = apiUrl(c.req);
+    return json({
+      auth: authView(auth),
+      ready: readyProviders(auth),
+      domains: companyDomains(c.org, auth),
+      verifiedDomain: c.org.domain || null,
+      platform: enabledProviders(env),
+      redirectUris: Object.fromEntries(COMPANY_PROVIDERS.map((id) => [id, `${base}/api/auth/oauth/${id}/callback`])),
+      emailEnabled: Boolean(env.RESEND_API_KEY && env.EMAIL_FROM),
+      secretsEncrypted: Boolean(env.SECRETS_KEY),
+    });
+  });
+
+  route('PUT', '/api/org/auth/providers/:id', async (c) => {
+    requireAdmin(c);
+    const id = c.params.id;
+    if (!COMPANY_PROVIDERS.includes(id)) fail(404, 'Unknown provider');
+    const auth = await orgAuth(c.org.id);
+    const current = auth.providers[id] || {};
+    const b = c.body;
+    const next = {
+      enabled: b.enabled !== false,
+      clientId: str(b.clientId, 300),
+      clientSecret: current.clientSecret || '',
+      secretHint: current.secretHint || '',
+      fetchGroups: Boolean(b.fetchGroups),
+      updatedAt: now(),
+    };
+    if (!next.clientId) fail(400, 'Enter the client ID');
+    const secret = str(b.clientSecret, 2000);
+    if (secret) {
+      next.clientSecret = await sealSecret(secret, env.SECRETS_KEY);
+      next.secretHint = secret.length > 8 ? `…${secret.slice(-4)}` : '…';
+    }
+    if (!next.clientSecret) fail(400, 'Enter the client secret');
+    if (id === 'microsoft') next.tenant = str(b.tenant, 100) || 'organizations';
+    if (id === 'oidc') {
+      next.issuer = str(b.issuer, 300).replace(/\/+$/, '');
+      next.label = str(b.label, 40) || 'SSO';
+      if (!/^https:\/\//i.test(next.issuer)) fail(400, 'The issuer must be an https URL');
+      try {
+        await authorizeUrl('oidc', next, { state: 'check', redirectUri: 'https://check' }); // discovery
+      } catch {
+        fail(400, `Couldn't read ${next.issuer}/.well-known/openid-configuration. Check the issuer URL.`);
+      }
+    }
+    auth.providers = { ...auth.providers, [id]: next };
+    await db.put(K.orgAuth(c.org.id), auth);
+    await refreshLogo(c.org, auth); // first sign-in connected: the header shows the company's logo
+    return json({ auth: authView(auth), ready: readyProviders(auth) });
+  });
+
+  route('DELETE', '/api/org/auth/providers/:id', async (c) => {
+    requireAdmin(c);
+    const auth = await orgAuth(c.org.id);
+    const { [c.params.id]: removed, ...rest } = auth.providers;
+    auth.providers = rest;
+    if (!readyProviders(auth).length) auth.requireSso = false; // never lock people out
+    await db.put(K.orgAuth(c.org.id), auth);
+    return json({ auth: authView(auth), ready: readyProviders(auth) });
+  });
+
+  // Email domains that sign in through the company, whether SSO is required, and new accounts.
+  route('PUT', '/api/org/auth/policy', async (c) => {
+    requireAdmin(c);
+    const auth = await orgAuth(c.org.id);
+    const before = { requireSso: auth.requireSso };
+    const domains = [...new Set((Array.isArray(c.body.domains) ? c.body.domains : []).map(cleanDomain).filter(Boolean))].slice(0, 20);
+    for (const d of domains) {
+      if (!validDomain(d)) fail(400, `${d} is not a valid domain`);
+      if (PUBLIC_DOMAINS.has(d)) fail(400, `${d} is a public email provider and can't belong to a company`);
+      const owner = (await db.get(K.ssoDomain(d))) || (await db.get(K.orgDomain(d)));
+      if (owner && owner.orgId !== c.org.id) fail(409, `${d} already belongs to another company on Rewind`);
+    }
+    for (const d of auth.domains || []) if (!domains.includes(d)) await db.delete(K.ssoDomain(d));
+    for (const d of domains) await db.put(K.ssoDomain(d), { orgId: c.org.id });
+    auth.domains = domains;
+    auth.autoProvision = c.body.autoProvision !== false;
+    auth.requireSso = Boolean(c.body.requireSso);
+    if (auth.requireSso && !readyProviders(auth).length) fail(400, 'Set up and enable a sign-in provider before requiring it');
+    await db.put(K.orgAuth(c.org.id), auth);
+    // SSO just became required: everyone who already has an account is told how to sign in now
+    const notified = auth.requireSso && !before.requireSso ? await notifySignInChange(c, auth) : null;
+    if (signInConnected(c.org, auth)) await refreshLogo(c.org, auth);
+    return json({ auth: authView(auth), ready: readyProviders(auth), domains: companyDomains(c.org, auth), notified });
+  });
+
+  // Tell every member (again) how the company signs in now: an email and a notice in the app.
+  route('POST', '/api/org/auth/notify', async (c) => {
+    requireAdmin(c);
+    const auth = await orgAuth(c.org.id);
+    if (!readyProviders(auth).length) fail(400, 'Set up and enable a sign-in provider first');
+    return json({ notified: await notifySignInChange(c, auth) });
+  });
+
+  async function notifySignInChange(c, auth) {
+    const providers = readyProviders(auth).map((p) => p.label);
+    const how = providers.join(' or ');
+    const users = await db.list(K.users(c.org.id));
+    const notice = { type: 'signin', providers, required: auth.requireSso, at: now(), by: c.user.name };
+    let emailed = 0;
+    for (const u of users) {
+      await db.patch(K.user(c.org.id, u.id), { notice });
+      const keepsPassword = u.role === 'admin';
+      const ok = await sendEmail({
+        to: u.email,
+        subject: `${c.org.name}: sign in to Rewind with ${how}`,
+        html: `<p>Hi ${escapeHtml(u.name)},</p>
+               <p><b>${escapeHtml(c.org.name)}</b> now signs in to Rewind with <b>${escapeHtml(how)}</b>, your company account.</p>
+               <p>Next time, open <a href="${appUrl(c.req)}/#/login">Rewind</a>, type <b>${escapeHtml(u.email)}</b> and choose <b>Continue with ${escapeHtml(providers[0])}</b>.</p>
+               ${auth.requireSso && !keepsPassword ? '<p>Your Rewind password no longer works for this company.</p>' : ''}
+               <p>Everything you had on Rewind stays the same.</p>`,
+      });
+      if (ok) emailed++;
+    }
+    auth.notifiedAt = notice.at;
+    await db.patch(K.orgAuth(c.org.id), { notifiedAt: notice.at });
+    return { people: users.length, emailed, emailEnabled: Boolean(env.RESEND_API_KEY && env.EMAIL_FROM) };
+  }
+
   // ------------------------------------------------------------ organization (admin)
   route('PATCH', '/api/org', async (c) => {
     requireAdmin(c);
@@ -636,14 +989,6 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     if (body.autoJoin !== undefined) {
       if (body.autoJoin && !org.domain) fail(400, 'Automatic sign-in requires a verified domain (social sign-in)');
       org.autoJoin = changes.autoJoin = Boolean(body.autoJoin);
-    }
-    if (body.theme !== undefined) {
-      const theme = {};
-      for (const k of THEME_KEYS) if (isColor(body.theme?.[k])) theme[k] = body.theme[k].toLowerCase();
-      org.theme = theme;
-      // the whole theme is replaced: clear the old object first, then set the new one
-      await db.patch(K.org(org.id), { theme: null });
-      changes.theme = theme;
     }
     if (Object.keys(changes).length) await db.patch(K.org(org.id), changes);
     if (c.user.onboarding === 'autoJoin' && body.autoJoin !== undefined) {
@@ -726,6 +1071,22 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
 
   route('POST', '/api/teams/:id/members', (c) => changeTeamMembership(c, true));
   route('DELETE', '/api/teams/:id/members/:userId', (c) => changeTeamMembership(c, false));
+
+  // Merge one team into another (e.g. "Pagamentos" made in Rewind into the "Payments" group).
+  route('POST', '/api/teams/:id/merge', async (c) => {
+    requireAdmin(c);
+    const from = await db.get(K.team(c.org.id, c.params.id));
+    const into = await db.get(K.team(c.org.id, str(c.body.into, 60)));
+    if (!from || !into) fail(404, 'Team not found');
+    if (from.id === into.id) fail(400, 'Pick another team');
+    if (from.groupKey && into.groupKey && from.groupKey !== into.groupKey) fail(409, 'Both teams follow different groups; they can’t be merged');
+    if (!into.groupKey && from.groupKey) {
+      into.groupKey = from.groupKey;
+      await db.patch(K.team(c.org.id, into.id), { groupKey: from.groupKey });
+    }
+    await mergeTeams(c.org.id, from.id, into.id);
+    return json({ team: into });
+  });
 
   route('DELETE', '/api/teams/:id', async (c) => {
     requireAdmin(c);
@@ -868,7 +1229,6 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
       onboarding: {
         teams: teams.length > 1 || teams.some((t) => t.groupKey),
         people: users.length > 1 || invites.length > 0,
-        appearance: Object.keys(c.org.theme || {}).length > 0,
       },
     };
   }
@@ -919,7 +1279,8 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     // a WebSocket handed over by a Durable Object goes back untouched (its headers are immutable)
     if (res.status === 101 || res.webSocket) return res;
     for (const [k, v] of Object.entries(cors)) res.headers.set(k, v);
-    res.headers.set('cache-control', 'no-store');
+    // API answers are never cached, unless a route says otherwise (e.g. the versioned company logo)
+    if (!res.headers.has('cache-control')) res.headers.set('cache-control', 'no-store');
     return res;
   }
 
