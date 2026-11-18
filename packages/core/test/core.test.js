@@ -234,3 +234,14 @@ test('durable storage: every key lives in its owner object, so every list stays 
   await s.put('session:old', { userId: 'u1' }, { ttl: -1 });
   assert.equal(await s.get('session:old'), null);
 });
+
+test('invite lookup shows the team and the role being offered', async () => {
+  const { call } = setup();
+  const { admin, me } = await bootstrap(call);
+  const asMember = (await call('POST', '/api/invites', { email: 'carl@acme.io', teamId: me.org.defaultTeamId }, admin)).data.invites[0];
+  const asAdmin = (await call('POST', '/api/invites', { email: 'dora@acme.io', teamId: me.org.defaultTeamId, role: 'admin' }, admin)).data.invites[0];
+  const a = (await call('GET', `/api/invites/${asMember.token}`)).data;
+  const b = (await call('GET', `/api/invites/${asAdmin.token}`)).data;
+  assert.deepEqual([a.teamName, a.role], ['General', 'member']);
+  assert.deepEqual([b.teamName, b.role], ['General', 'admin']);
+});

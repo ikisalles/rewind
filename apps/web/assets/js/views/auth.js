@@ -1,5 +1,5 @@
 import { get, post, session, apiUrl } from '../api.js';
-import { h, mount, button, field, icon, toast } from '../ui.js';
+import { h, mount, button, field, icon, toast, badge } from '../ui.js';
 import { logo, SLOGAN, store } from '../app.js';
 
 let configCache;
@@ -133,7 +133,24 @@ export async function inviteView(root, { params }) {
     root,
     card(
       h('h1', {}, `Join ${invite.orgName}`),
-      h('p', { class: 'muted small' }, 'Invite for ', h('strong', {}, invite.email), invite.teamName ? [' on the team ', h('strong', {}, invite.teamName)] : null, '.'),
+      // what you're accepting: who, which team and which role
+      h(
+        'dl',
+        { class: 'kv invite-summary' },
+        h('dt', {}, 'Email'),
+        h('dd', {}, invite.email),
+        h('dt', {}, 'Team'),
+        h('dd', {}, invite.teamName || 'Default team'),
+        h('dt', {}, 'Role'),
+        h('dd', {}, invite.role === 'admin' ? badge('Admin', 'accent') : badge('Member')),
+      ),
+      h(
+        'p',
+        { class: 'muted small' },
+        invite.role === 'admin'
+          ? 'As an admin you can manage the company: people, teams, invites, modules and appearance, and every board.'
+          : "As a member you take part in your team's retros: write notes, vote and follow your action items.",
+      ),
       socialButtons(cfg.providers, params.token),
       form(
         async (data) => finish((await post(`/api/invites/${params.token}/accept`, data)).token),
