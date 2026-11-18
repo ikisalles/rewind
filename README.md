@@ -21,6 +21,7 @@ Rewind is an open source tool for agile retrospectives. It is designed to run on
 | Invites | For manually created companies, or when automatic sign-in is off, the admin invites people by email and picks their team and role. The link can be copied; the email is sent if Resend is configured. |
 | Teams | Administration → Teams lists the teams; open one to see its members, remove someone or add a person who is already in the company. |
 | Same company name | Registering a company name that already exists (ignoring case, accents and extra spaces) doesn't create a duplicate: the request waits for approval. The person who registered the company gets an email and every admin sees the request in Administration → Members (and on the dashboard). Approved people join as members of the teams the admin picks, so they only see those teams' boards. Denied people get an email and can't register that company again; registering a different company name reactivates their sign-up. |
+| My account | The avatar in the header opens *My account*: basic info (name, email, company, role; read-only for now) and *Integrations*, where each person saves their own Jira (site, email, API token) and GitHub (personal access token) tokens. Tokens are write-only: the API only returns their last 4 characters, and they are encrypted with `SECRETS_KEY` when it is set. |
 | Retro | Boards per team → sprints with start and end dates → configurable columns → sticky notes from each member. |
 | Templates | When creating a sprint, pick a format (Start/Stop/Continue, 4Ls, Mad/Sad/Glad, Sailboat, Starfish, Rose/Thorn/Bud or Classic) or start blank and add the columns yourself. Each column can have a prompt shown in the note box. A template can also be applied later from the board (*Template*). |
 | Hide notes | The retro admin hides or reveals the notes. While they are hidden, the API doesn't send other people's text at all: it is not just a blur on screen. |
@@ -328,6 +329,7 @@ If the frontend and the API live on different hosts, set `apiBase` in `apps/web/
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Enable Microsoft Entra ID sign-in. |
 | `MICROSOFT_FETCH_GROUPS` | `true` fetches groups (requires the `GroupMember.Read.All` permission with admin consent). |
 | `RESEND_API_KEY` / `EMAIL_FROM` | Optional: sends invites and access-request emails through Resend. |
+| `SECRETS_KEY` | Recommended: encrypts (AES-GCM) the integration tokens people save in My account. Keep it stable, since changing it makes saved tokens unreadable. |
 | `REWIND_DATABASE` | Azion: SQL Database name (default `rewind`). |
 | `AZION_TOKEN` | Azion: personal token. Used by `npm run azion:setup`; on the function only with `--with-token` (SQL API fallback). |
 | `REWIND_SQL_MODE` | Azion: `api` sends every query through the SQL Database REST API (needs `AZION_TOKEN`). |

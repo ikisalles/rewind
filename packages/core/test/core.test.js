@@ -245,3 +245,36 @@ test('invite lookup shows the team and the role being offered', async () => {
   assert.deepEqual([a.teamName, a.role], ['General', 'member']);
   assert.deepEqual([b.teamName, b.role], ['General', 'admin']);
 });
+
+test('personal integrations: tokens are sealed, never returned, and kept per person', async () => {
+  const { call, storage } = setupApp({ env: { SECRETS_KEY: 'test-secret' } });
+  const { admin, bia, me } = await bootstrap(call);
+  const empty = (await call('GET', '/api/me/integrations', null, admin)).data.integrations;
+  assert.deepEqual(empty, { jira: { configured: false }, github: { configured: false } });
+
+  assert.equal((await call('PUT', '/api/me/integrations/jira', { site: 'acme.atlassian.net', email: 'ana@acme.io' }, admin)).status, 400); // no token
+  assert.equal((await call('PUT', '/api/me/integrations/jira', { site: 'http://acme.atlassian.net', email: 'ana@acme.io', token: 'x' }, admin)).status, 400);
+  assert.equal((await call('PUT', '/api/me/integrations/gitlab', { token: 'x' }, admin)).status, 404);
+
+  const jira = await call('PUT', '/api/me/integrations/jira', { site: 'acme.atlassian.net/jira', email: 'ana@acme.io', token: 'ATATT-super-secret-1234' }, admin);
+  assert.equal(jira.status, 200);
+  assert.equal(jira.data.integrations.jira.site, 'https://acme.atlassian.net');
+  assert.equal(jira.data.integrations.jira.tokenHint, '…1234');
+  assert.equal(JSON.stringify(jira.data).includes('super-secret'), false);
+  await call('PUT', '/api/me/integrations/github', { token: 'ghp_abcdefgh5678' }, admin);
+
+  const raw = await storage.get(`integration:${me.org.id}:${me.user.id}`);
+  assert.match(raw.jira.token, /^aesgcm:/);
+  const { openSecret } = await import('../src/lib/crypto.js');
+  assert.equal(await openSecret(raw.jira.token, 'test-secret'), 'ATATT-super-secret-1234');
+
+  // changing only the site keeps the saved token
+  const moved = await call('PUT', '/api/me/integrations/jira', { site: 'https://new.atlassian.net', email: 'ana@acme.io' }, admin);
+  assert.equal(moved.data.integrations.jira.tokenHint, '…1234');
+  assert.equal(await openSecret((await storage.get(`integration:${me.org.id}:${me.user.id}`)).jira.token, 'test-secret'), 'ATATT-super-secret-1234');
+
+  assert.equal((await call('GET', '/api/me/integrations', null, bia)).data.integrations.github.configured, false); // per person
+  const left = (await call('DELETE', '/api/me/integrations/github', null, admin)).data.integrations;
+  assert.deepEqual([left.github.configured, left.jira.configured], [false, true]);
+  assert.equal((await call('GET', '/api/me/integrations')).status, 401);
+});
