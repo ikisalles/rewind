@@ -27,7 +27,7 @@ import { releaseNotes, changeSummary } from './notes.js';
 import { bump, suggestBump, valid as validVersion, BUMPS } from './semver.js';
 import {
   SECTIONS, TRANSITIONS, EDITABLE, EXECUTABLE, OPEN, DEFAULT_SETTINGS, DEFAULT_STEPS, ROLES, DEPLOY_STATUSES, ENVIRONMENTS,
-  emptyChange, cleanSettings, cleanStep, calculateRisk, riskLevel, description, changeTypeOf, requiredApprovals, rolesFor, readiness,
+  emptyChange, cleanSettings, cleanStep, calculateRisk, riskLevel, description, changeTypeOf, requiredApprovals, rolesFor, readiness, isOwner,
 } from './model.js';
 
 export * as semver from './semver.js';
@@ -51,6 +51,9 @@ const K = {
   seq: (orgId, year) => `chgseq:${orgId}:${year}`,
   settings: (orgId) => `gmudcfg:${orgId}`,
   meta: (orgId) => `gmudmeta:${orgId}`,
+  // what is left of a deleted change: who deleted it, when and why (the change itself is gone)
+  deleted: (orgId, id) => `chgdel:${orgId}:${id}`,
+  deletedAll: (orgId) => `chgdel:${orgId}:`,
   // before each change had its own object
   legacy: {
     changes: (orgId) => `chg:${orgId}:`,
@@ -80,7 +83,7 @@ export default defineModule({
   keyPrefixes: ['gmud:', 'gmudrel:', 'gmuddep:', 'chgidx:', 'relidx:', 'depidx:'],
   shards: {
     gmud: 'gmud', gmudev: 'gmud', gmudrel: 'gmud', gmuddep: 'gmud', // one object per change
-    chgidx: 'org', relidx: 'org', depidx: 'org', chgseq: 'org', gmudcfg: 'org', gmudmeta: 'org',
+    chgidx: 'org', relidx: 'org', depidx: 'org', chgseq: 'org', gmudcfg: 'org', gmudmeta: 'org', chgdel: 'org',
     chg: 'org', chgev: 'org', rel: 'org', dep: 'org', // old layout, read once to move it
   },
   register(core) {
@@ -233,6 +236,8 @@ export default defineModule({
           manage: canEdit(c, change),
           execute: canExecute(c, change) && EXECUTABLE.includes(change.status),
           decide: rolesFor(change, c.user, settings),
+          // drafts: their editors; any change, in any status: admins and owners
+          delete: (change.status === 'draft' && canEdit(c, change)) || isOwner(settings, c.user),
         },
       };
     }
@@ -299,6 +304,8 @@ export default defineModule({
         settings.approvers[r] = settings.approvers[r].filter((id) => users.has(id));
         settings.approverTeams[r] = settings.approverTeams[r].filter((id) => teams.has(id));
       }
+      settings.owners.people = settings.owners.people.filter((id) => users.has(id));
+      settings.owners.teams = settings.owners.teams.filter((id) => teams.has(id));
       await db.put(K.settings(c.org.id), settings);
       return json({ settings });
     });
@@ -426,14 +433,38 @@ export default defineModule({
       return json(await view(c, change));
     });
 
+    // Deleting is for good (cancelling keeps the change): drafts by their editors; any change, in any
+    // status, by admins and owners (Company settings → GMUDs), with a reason. Everything goes: the
+    // change, its log, releases and deployments; a short record says who deleted what, when and why.
     route('DELETE', '/api/gmud/changes/:id', async (c) => {
       const change = await loadChange(c);
-      if (!canEdit(c, change)) fail(403, 'Only the requester, the responsible person or an admin can delete this change');
-      if (change.status !== 'draft') fail(409, 'Only drafts can be deleted. Cancel the change instead.');
+      const settings = await settingsOf(c.org.id);
+      const owner = isOwner(settings, c.user);
+      if (!owner) {
+        if (change.status !== 'draft') fail(403, 'Only admins and GMUD owners can delete a change that left draft. Cancel it instead.');
+        if (!canEdit(c, change)) fail(403, 'Only the requester, the responsible person or an admin can delete this change');
+      }
+      const reason = str(c.body.reason, 1000);
+      if (change.status !== 'draft' && !reason) fail(400, 'Say why the change is being deleted');
       for (const e of await db.list(K.events(change.id))) await db.delete(K.event(change.id, e.id));
+      for (const r of await db.list(K.releases(change.id))) {
+        await db.delete(K.release(change.id, r.id));
+        await db.delete(K.releaseIdx(c.org.id, r.id));
+      }
+      for (const d of await db.list(K.deployments(change.id))) {
+        await db.delete(K.deployment(change.id, d.id));
+        await db.delete(K.deploymentIdx(c.org.id, d.id));
+      }
       await db.delete(K.change(change.id));
       await db.delete(K.index(c.org.id, change.id));
-      return json({ ok: true });
+      await db.put(K.deleted(c.org.id, change.id), { id: change.id, number: change.number, title: change.overview.title, status: change.status, by: c.user.id, byName: c.user.name, at: now(), reason });
+      return json({ ok: true, deleted: change.number });
+    });
+
+    // deleted changes (admins and owners): the record left behind
+    route('GET', '/api/gmud/deleted', async (c) => {
+      if (!isOwner(await settingsOf(c.org.id), c.user)) fail(403, 'Admins and GMUD owners only');
+      return json({ deleted: (await db.list(K.deletedAll(c.org.id))).sort((a, b) => b.at.localeCompare(a.at)) });
     });
 
     route('POST', '/api/gmud/changes/:id/submit', async (c) => {
@@ -735,10 +766,12 @@ export default defineModule({
           if (change) await save(change, { overview: { ...change.overview, teamId: intoId } });
         }
         const saved = await db.get(K.settings(orgId));
+        const swap = (ids = []) => [...new Set(ids.map((t) => (t === fromId ? intoId : t)))];
         if (saved?.approverTeams) {
-          const approverTeams = Object.fromEntries(Object.entries(saved.approverTeams).map(([role, ids]) => [role, [...new Set(ids.map((t) => (t === fromId ? intoId : t)))]]));
+          const approverTeams = Object.fromEntries(Object.entries(saved.approverTeams).map(([role, ids]) => [role, swap(ids)]));
           await db.patch(K.settings(orgId), { approverTeams });
         }
+        if (saved?.owners?.teams?.length) await db.patch(K.settings(orgId), { owners: { ...saved.owners, teams: swap(saved.owners.teams) } });
       },
       beforeTeamDelete: async (c, teamId) => {
         const open = (await listIndex(c.org.id)).filter((ch) => ch.teamId === teamId && OPEN.includes(ch.status));

@@ -32,14 +32,14 @@ Rewind is an open source tool for agile retrospectives. It is designed to run on
 | Share | Creates a public, read-only link that can be disabled at any time. |
 | Finish retro | Admin only. Locks editing and opens the 3 most voted items, each with action items (owner, optional due date and done status). |
 | Pending items | Shows the previous sprint's unfinished action items so they can be re-validated: keep in this sprint, already done, or no longer relevant. |
-| Appearance | The admin changes the company colors, with presets and a live preview. Whoever deploys Rewind sets the default colors in `apps/web/config.js`. |
+| Appearance | Each person picks their own theme (Dark, Light or Ocean) in **My account → Appearance**, with a preview of each; it applies when they save, to them only, on any browser. Whoever deploys Rewind can tweak the default (dark) colors in `apps/web/config.js`. |
 | Home dashboard | What needs you now (retros where you haven't added a note or still have votes, sprints ending soon for the retro admin), your open action items with one-click done, the top 3 of each board's latest retro and how its action items are going, team health over the last 6 sprints (action items done, participation, items carried over) and, for admins, a getting-started checklist plus housekeeping (pending invites, members without a team, boards with no activity for 4 weeks). |
 
 The default look is a dark console: near-black background, surfaces with subtle borders, orange accent,
 Inter font and Roboto Mono in the footer.
 
 Admins have one menu entry, **Company settings** (`#/admin`), laid out like *My account*: a menu on the
-left (Company, Modules with each module's own settings under it, Members, Teams, Invites, Appearance) and
+left (Company, Modules with each module's own settings under it, Members, Teams, Invites, Sign-in & SSO) and
 the section on the right. Pending access requests show as a count on the menu entry and on Members.
 
 ## Structure
@@ -75,7 +75,8 @@ apps/
     config.js             deployment settings (apiBase, name, slogan, default colors)
 scripts/
   web-layout.mjs        how shell and modules are laid out at runtime (+ the import map)
-  build-web.mjs         copies that layout into dist/web for CDNs, Cloudflare and Azion
+  build-web.mjs         copies that layout into dist/web for CDNs, Cloudflare and Azion, versioned:
+                        index.html points at _v/<content hash>/, so a deploy never mixes old and new files
   azion-setup.mjs       creates the Azion SQL Database, table and environment variables
 azion.config.mjs        Azion resources: storage, function, application rules, workload
 azion/azion.json        IDs of the Azion resources (written by the CLI, keep it committed)
@@ -151,13 +152,18 @@ Turn it on in **Company settings → Modules**.
 | Changes | Indicators for a period (total, waiting for approval, approved/scheduled, in progress, completed, failed/rolled back), filters (status, SemVer type, category, repository, responsible, environment, risk, search) and the table, with an **Approvers** column: per required approval, the groups/people who can decide, or who decided (and for which group); drafts show the approvals they will need. |
 | New change | A draft is created at once (`CHG-YYYY-NNNN`, never changes) and filled in five steps that save themselves: Overview (title, category, priority, owner, team, environment, window) · Code & Changes (repositories, PRs, versions and the one description of the change) · Risk & Testing (risk level, tests, rollback) · Execution · Approval (review and submit). Nothing is asked before the step it depends on: the change type comes from the repositories' increments (the highest wins) and the risk level from the likelihood × impact matrix (or set by hand in that step). |
 | Details | Tabs Overview, Code Changes, Risk & Testing, Execution, Approvals and Activity Log, with the actions the status allows. |
-| Document | The change laid out as a document (A4): identification, description, repositories and PRs, impact and risk, testing, rollback, execution plan and approvals. Before submitting, the last step of the form opens it as a preview and **Submit for approval** is there. Any time: **Save as PDF** (the browser's print dialog, only the document is printed) or **Download Word** (`.doc`). |
+| Document | The change laid out as a document (A4): identification, description, repositories and PRs, impact and risk, testing, rollback, execution plan and approvals. Before submitting, the last step of the form opens it as a preview and **Submit for approval** is there. Any time: **Download** → PDF (the browser's print dialog, only the document is printed) or Word (`.doc`). |
 | Releases | One release per repository is planned when a change is approved (version, previous version, notes generated from the PRs, editable); released when the change completes. |
 | Deployments | Registered per environment from a change; status history. A deployment that starts moves the change to *in progress*; a failed deployment doesn't invalidate its releases. |
 | Company settings → GMUDs | Admins only, shown while the module is on. Approvers per role (technical, change, security): people and/or groups — teams, which can come from Google/Microsoft/GitHub groups — and anyone in a listed group can decide (nothing listed = any admin; decisions record the group they were made for), when each is required (environments, minimum risk, categories), self-approval, and the SemVer suggestion policy. |
 
 **Workflow**: Draft → Submitted → In review → Approved / Rejected → Scheduled → In progress → Completed /
 Failed / Rolled back, plus Cancelled, Withdraw (back to draft) and Revise (a rejected change back to draft).
+
+**Deleting** is for good, unlike cancelling: the change, its activity log, releases and deployments go away.
+Drafts can be deleted by their requester/responsible; any change, in any status, by **admins and GMUD
+owners** (people and/or groups set in Company settings → GMUDs → Owners), with a reason and by typing the
+change ID. A short record (ID, title, status, who, when, why) is kept and listed in the same settings page.
 Only drafts can be edited. Requesters can't approve their own changes (unless the company allows it);
 rejecting needs a reason.
 
@@ -451,6 +457,46 @@ The sign-in and sign-up pages show a button per configured provider. When none i
   (gmail.com, outlook.com…) never become a shared company: those people get their own workspace.
 - The first admin is asked whether colleagues from the domain may join automatically. If not, they need an invite.
 - Rewind only accepts verified emails from the provider.
+
+## Company sign-in and SSO (per company)
+
+Besides the platform's providers above (environment variables, offered to every company), each company can
+bring its **own** sign-in in **Company settings → Sign-in & SSO**: its Google Workspace, Microsoft Entra ID
+or GitHub OAuth app, or **any OpenID Connect provider** (Okta, Auth0, Keycloak, JumpCloud, OneLogin...).
+Both formats run through the same code: a company's credentials when it has them, the platform's otherwise.
+
+- The admin enters the client ID and secret (stored encrypted with `SECRETS_KEY`, never shown again) and
+  registers the redirect URI shown on the page (`<API>/api/auth/oauth/<provider>/callback`). For OpenID
+  Connect, the issuer URL is checked through its `/.well-known/openid-configuration`.
+- **Company email domains**: people with these emails are sent to the company's sign-in. A domain can only
+  belong to one company; public mail providers can't be used.
+- **Sign-in page**: the email comes first (`POST /api/auth/discover`); people of a company with its own
+  sign-in see its buttons ("Continue with Okta"), and the password field when it's still allowed.
+- A company's provider only ever leads into **that** company: it never creates a new company and never signs
+  in someone who belongs to another one. New people from the company's domains get a member account
+  (*Create accounts for new people*, on by default) or need an invite. The `groups` claim (OIDC) and
+  Google/Microsoft groups place people in teams.
+- **Require company sign-in**: members can no longer use passwords (or the platform's providers); admins keep
+  their password for emergencies. Turning it on notifies everyone who already has an account, **by email**
+  (when Resend is configured) **and in the app** (a notice on their next visit, cleared once they sign in the
+  new way). *Notify everyone again* resends it. Removing the last provider turns the requirement off, so
+  nobody gets locked out. Invites follow the same rule (accept with the company's sign-in).
+- **Groups never duplicate teams.** A group whose name matches a team made in Rewind (ignoring case, accents
+  and spaces) links that team instead of creating another; duplicates from before are merged into the older
+  team. Teams with different names ("Pagamentos" × "Payments") are merged by hand: *Merge into…* on the team's
+  page. A merge moves members, the default team, pending invites, boards (retro), changes and approver
+  groups (GMUD) — modules take part through `onTeamMerge(orgId, fromId, intoId)`.
+- Group membership is added at sign-in; it isn't removed when someone leaves a group in the provider (there is
+  no SCIM sync).
+- **Company logo**: while the company has a sign-in connected, its logo replaces the building icon next to its
+  name in the header. It is taken from the company's own website, through the domain its sign-in uses (the
+  icons the home page declares, then `/apple-touch-icon.png` and `/favicon.ico`; https only, up to 100 KB) — no
+  third-party logo service. It is stored apart from the company record and served by its own cacheable URL
+  (`GET /api/orgs/<id>/logo?v=…`), so it never travels with each request. Company settings → Company has
+  *Fetch again* and *Remove*.
+- People who sign in through a provider see in **My account → Basic info** that their account is managed there:
+  name, email and groups come from the provider (the name and new groups update at each sign-in).
+- SAML is not supported; OpenID Connect covers the same identity providers.
 
 ## How social sign-in picks the company and team
 

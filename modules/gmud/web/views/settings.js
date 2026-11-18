@@ -1,13 +1,13 @@
 // Company settings → GMUDs (admins, while the module is on): who approves each role, when each
 // approval is required, self-approval, and the SemVer suggestion policy.
 import { get, api } from '@rewind/web/api.js';
-import { h, mount, button, field, attempt, section, icon } from '@rewind/web/ui.js';
+import { h, mount, button, field, attempt, section, icon, fmtDateTime } from '@rewind/web/ui.js';
 import { isAdmin, store } from '@rewind/web/app.js';
 import { ROLES, LEVEL, ENVS, CATEGORIES, TYPES, loadPeople, select, checkbox } from '../lib.js';
 
 export async function settingsTab(root, reload) {
   if (!isAdmin()) return mount(root, h('p', { class: 'muted' }, 'Only admins can change these settings.'));
-  const [{ settings: s }, people] = await Promise.all([get('/api/gmud/settings'), loadPeople()]);
+  const [{ settings: s }, people, { deleted }] = await Promise.all([get('/api/gmud/settings'), loadPeople(), get('/api/gmud/deleted')]);
   const form = h(
     'form',
     {
@@ -18,6 +18,7 @@ export async function settingsTab(root, reload) {
         const body = {
           approvers: Object.fromEntries(Object.keys(ROLES).map((r) => [r, fd.getAll(`approver-${r}`)])),
           approverTeams: Object.fromEntries(Object.keys(ROLES).map((r) => [r, fd.getAll(`approverTeam-${r}`)])),
+          owners: { teams: fd.getAll('ownerTeam'), people: fd.getAll('ownerPerson') },
           rules: {
             technical: fd.get('technical') === 'on',
             changeEnvironments: fd.getAll('changeEnvironments'),
@@ -55,6 +56,24 @@ export async function settingsTab(root, reload) {
       ),
     ),
     section(
+      'Owners',
+      h('p', { class: 'muted small section-hint' }, 'Owners can delete any change, in any status (deleting is for good, unlike cancelling). Admins are always owners.'),
+      h(
+        'div',
+        { class: 'approver-grid' },
+        h(
+          'fieldset',
+          { class: 'checks' },
+          h('legend', {}, 'Owners'),
+          h('span', { class: 'approver-group muted small' }, 'Groups (teams)'),
+          store.me.teams.map((t) => h('label', {}, h('input', { type: 'checkbox', name: 'ownerTeam', value: t.id, checked: (s.owners?.teams || []).includes(t.id) }), icon('team', 14), t.name)),
+          h('span', { class: 'approver-group muted small' }, 'People'),
+          people.filter((p) => p.role !== 'admin').map((p) => h('label', {}, h('input', { type: 'checkbox', name: 'ownerPerson', value: p.id, checked: (s.owners?.people || []).includes(p.id) }), p.name)),
+        ),
+        deletedPanel(deleted),
+      ),
+    ),
+    section(
       'When each approval is required',
       h(
         'div',
@@ -81,3 +100,16 @@ export async function settingsTab(root, reload) {
   );
   mount(root, form);
 }
+
+// What is left of deleted changes: who, when, why.
+function deletedPanel(list) {
+  return h(
+    'div',
+    { class: 'panel deleted-panel' },
+    h('strong', {}, `Deleted changes (${list.length})`),
+    list.length
+      ? h('ul', { class: 'plain-list small' }, list.slice(0, 20).map((d) => h('li', {}, h('span', { class: 'mono' }, d.number), ` ${d.title || 'Untitled'} — ${d.status.replace('_', ' ')}, deleted by ${d.byName} on ${fmtDateTime(d.at)}`, d.reason ? h('div', { class: 'muted' }, `“${d.reason}”`) : null)))
+      : h('p', { class: 'muted small' }, 'None.'),
+  );
+}
+

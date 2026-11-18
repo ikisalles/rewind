@@ -19,6 +19,7 @@
 //           ...rest,                            //   available as admin[<id>]
 //         }),
 //         beforeTeamDelete: async (c, teamId) => {}, // optional: throw (fail) to block it
+//         onTeamMerge: async (orgId, fromId, intoId) => {}, // optional: move the module's data to the kept team
 //       };
 //     },
 //   });

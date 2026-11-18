@@ -415,3 +415,50 @@ test('approvers can be teams (groups): anyone in the team decides, together with
   assert.deepEqual(listed.settings.approverTeams.technical, [cab.id]);
   void biaId;
 });
+
+test('deleting for good: admins and owners (people or groups) delete changes in any status, with a record', async () => {
+  const { call, storage } = setup();
+  const { admin, bia, me } = await signupCompany(call);
+  const cab = (await call('POST', '/api/teams', { name: 'CAB' }, admin)).data.team;
+  const join = async (email, teamId) => {
+    const inv = (await call('POST', '/api/invites', { email, teamId }, admin)).data.invites[0];
+    return (await call('POST', `/api/invites/${inv.token}/accept`, { name: email, password: 'strong-pass' })).data.token;
+  };
+  const carl = await join('carl@acme.io', cab.id); // owner through the CAB group
+  const dora = await join('dora@acme.io', me.org.defaultTeamId); // owner by name
+  const doraId = (await call('GET', '/api/me', null, dora)).data.user.id;
+  await call('PUT', '/api/gmud/settings', { owners: { teams: [cab.id, 'ghost'], people: [doraId] }, allowSelfApproval: true }, admin);
+  assert.deepEqual((await call('GET', '/api/gmud/settings', null, admin)).data.settings.owners, { people: [doraId], teams: [cab.id] });
+
+  // an approved change with a release and a deployment
+  const id = await readyDraft(call, admin, me);
+  await call('POST', `/api/gmud/changes/${id}/submit`, {}, admin);
+  await call('POST', `/api/gmud/changes/${id}/decision`, { role: 'technical', decision: 'approved' }, admin);
+  await call('POST', `/api/gmud/changes/${id}/decision`, { role: 'change', decision: 'approved' }, admin);
+  const dep = (await call('POST', `/api/gmud/changes/${id}/deployments`, { status: 'planned' }, admin)).data.deployment;
+  const rel = (await call('GET', '/api/gmud/releases', null, admin)).data.releases[0];
+
+  // who may: not a regular member; yes owners by group and by name, and admins
+  assert.deepEqual([(await call('GET', `/api/gmud/changes/${id}`, null, bia)).data.can.delete, (await call('GET', `/api/gmud/changes/${id}`, null, carl)).data.can.delete], [false, true]);
+  assert.equal((await call('DELETE', `/api/gmud/changes/${id}`, { reason: 'x' }, bia)).status, 403);
+  assert.equal((await call('DELETE', `/api/gmud/changes/${id}`, {}, carl)).status, 400); // a reason is needed once it left draft
+  const del = await call('DELETE', `/api/gmud/changes/${id}`, { reason: 'Opened by mistake, duplicate of another GMUD' }, carl);
+  assert.deepEqual([del.status, del.data.deleted], [200, 'CHG-2026-0001']);
+
+  // everything is gone: the change, its log, releases and deployments, and their summaries
+  assert.equal((await call('GET', `/api/gmud/changes/${id}`, null, admin)).status, 404);
+  assert.equal((await call('GET', '/api/gmud/changes', null, admin)).data.changes.length, 0);
+  assert.equal((await call('GET', '/api/gmud/releases', null, admin)).data.releases.length, 0);
+  assert.equal((await call('GET', '/api/gmud/deployments', null, admin)).data.deployments.length, 0);
+  for (const key of [`gmud:${id}`, `gmudrel:${id}:${rel.id}`, `gmuddep:${id}:${dep.id}`, `relidx:${me.org.id}:${rel.id}`, `depidx:${me.org.id}:${dep.id}`]) assert.equal(await storage.get(key), null, key);
+  assert.equal((await storage.list(`gmudev:${id}:`)).length, 0);
+
+  // the record left behind, for admins and owners
+  const record = (await call('GET', '/api/gmud/deleted', null, dora)).data.deleted[0];
+  assert.deepEqual([record.number, record.status, record.byName, record.reason], ['CHG-2026-0001', 'approved', 'carl@acme.io', 'Opened by mistake, duplicate of another GMUD']);
+  assert.equal((await call('GET', '/api/gmud/deleted', null, bia)).status, 403);
+
+  // drafts: still deletable by their editors, without a reason
+  const draft = (await call('POST', '/api/gmud/changes', {}, bia)).data.change.id;
+  assert.equal((await call('DELETE', `/api/gmud/changes/${draft}`, null, bia)).status, 200);
+});

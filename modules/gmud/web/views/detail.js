@@ -1,6 +1,6 @@
 // A change's details page: header with what can be done now, and the tabs Overview, Code
 // Changes, Risk & Testing, Execution, Approvals and Activity Log.
-import { get, post, patch } from '@rewind/web/api.js';
+import { get, post, patch, del } from '@rewind/web/api.js';
 import { h, mount, button, field, badge, attempt, icon, pageHeader, modal, table, fmtDateTime, avatar, toast } from '@rewind/web/ui.js';
 import { keepUpdated } from '@rewind/web/live.js';
 import {
@@ -114,10 +114,44 @@ function actions(v, reload) {
     if (['in_progress', 'failed', 'completed'].includes(s) && can.execute) out.push(act('rollback', 'Roll back', { variant: 'danger-ghost', iconName: 'undo', reason: 'Why is it being rolled back?' }));
   }
   if (can.manage && ['draft', 'submitted', 'in_review', 'approved', 'scheduled'].includes(s)) out.push(act('cancel', 'Cancel change', { variant: 'danger-ghost', iconName: 'x', reason: 'Why is it cancelled?' }));
+  if (can.delete) out.push(button('Delete', { variant: 'danger-ghost', iconName: 'trash', onClick: () => deleteModal(change) }));
   return out;
 }
 
 // run(comment) does the action; when it succeeds the window closes, then the page reloads
+// Deleting is for good (unlike cancelling): the change, its log, releases and deployments go away.
+// Admins and GMUD owners can do it in any status; a short record keeps who, when and why.
+function deleteModal(change) {
+  const draft = change.status === 'draft';
+  const typed = h('input', { name: 'confirm', autocomplete: 'off', placeholder: change.number, 'aria-label': `Type ${change.number} to confirm` });
+  const go = button('Delete for good', { variant: 'danger', iconName: 'trash', disabled: true, type: 'submit' });
+  go.setAttribute('form', 'delete-form');
+  typed.addEventListener('input', () => (go.disabled = typed.value.trim().toUpperCase() !== change.number));
+  const m = modal({
+    title: `Delete ${change.number}?`,
+    body: h(
+      'form',
+      {
+        id: 'delete-form',
+        class: 'stack',
+        onSubmit: async (e) => {
+          e.preventDefault();
+          const reason = new FormData(e.target).get('reason') || '';
+          const r = await attempt(() => del(`/api/gmud/changes/${change.id}`, { reason }), `${change.number} deleted`);
+          if (!r) return;
+          m.close();
+          location.hash = '#/changes';
+        },
+      },
+      h('p', {}, draft ? 'This draft goes away for good.' : h('span', {}, 'This is not a cancellation: the change, its activity log, releases and deployments ', h('strong', {}, 'go away for good'), '. Only a short record of who deleted it, when and why is kept.')),
+      draft ? null : h('p', { class: 'muted small' }, 'To keep the history, cancel the change instead.'),
+      field(draft ? 'Reason (optional)' : 'Why is it being deleted?', h('textarea', { name: 'reason', rows: 2, required: !draft, maxlength: 1000 })),
+      field(`Type ${change.number} to confirm`, typed),
+    ),
+    actions: [button('Keep it', { onClick: () => m.close() }), go],
+  });
+}
+
 function reasonModal(title, reason, confirm, run, reload) {
   const m = modal({
     title,
