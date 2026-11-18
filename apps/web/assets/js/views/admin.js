@@ -1,7 +1,8 @@
 import { get, post, patch, del } from '../api.js';
 import { h, mount, button, field, badge, table, modal, avatar, attempt, confirmDialog, copyText, fmtDateTime, icon, toast, pageHeader, section } from '../ui.js';
 import { applyTheme, TOKENS, PRESETS, DEFAULT_THEME } from '../theme.js';
-import { store, loadMe } from '../app.js';
+import { store, loadMe, moduleAdminTabs } from '../app.js';
+import { MODULES } from '../modules.js';
 
 // Reads can lag a moment behind writes (database replicas), so what was just decided here
 // is kept for a minute: a decided request never comes back, an approved person shows up at once.
@@ -10,14 +11,15 @@ const decidedRequests = new Map(); // request id -> time
 const approvedMembers = new Map(); // member id -> { member, at }
 const recent = (at) => Date.now() - at < RECENT_MS;
 
+// pending access requests: on "Company settings" in the menu and on "Members" in the page
 function setRequestsBadge(n) {
-  const item = document.querySelector('.drawer a[href="#/admin/members"]');
-  if (!item) return;
-  item.querySelector('.count-pill')?.remove();
-  if (n > 0) item.append(h('span', { class: 'count-pill' }, String(n)));
+  for (const item of document.querySelectorAll('.drawer a[href="#/admin"], .side-nav a[href="#/admin/members"]')) {
+    item.querySelector('.count-pill')?.remove();
+    if (n > 0) item.append(h('span', { class: 'count-pill' }, String(n)));
+  }
 }
 
-const TABS = [
+const SECTIONS = [
   ['company', 'Company', 'building'],
   ['modules', 'Modules', 'modules'],
   ['members', 'Members', 'user'],
@@ -26,23 +28,46 @@ const TABS = [
   ['appearance', 'Appearance', 'palette'],
 ];
 
+// Company settings: same layout as My account, a menu on the left and the section on the right.
+// Modules add their own sections under "Modules" (only while the company has them on).
 export async function adminView(root, { params }) {
   if (store.me.user.role !== 'admin') {
-    mount(root, pageHeader('Administration'), h('p', { class: 'muted' }, 'Only admins can access this area.'));
+    mount(root, pageHeader('Company settings'), h('p', { class: 'muted' }, 'Only admins can access this area.'));
     return;
   }
-  const tab = params.teamId ? 'teams' : params.tab || 'company';
-  const body = h('div', {});
+  const current = params.teamId ? 'teams' : params.tab || 'company';
+  const extra = moduleAdminTabs(MODULES);
+  const known = [...SECTIONS.map(([id]) => id), ...extra.map((t) => t.id)];
+  // a section that isn't there (e.g. of a module that was turned off) opens Company
+  if (!known.includes(current)) return void location.replace('#/admin/company');
+
+  const navItem = (id, label, ic, sub = false) =>
+    h(
+      'a',
+      { href: `#/admin/${id}`, class: `side-item${sub ? ' sub' : ''}${current === id ? ' active' : ''}` },
+      icon(ic, 14),
+      label,
+      id === 'members' && store.me.pendingRequests ? h('span', { class: 'count-pill' }, String(store.me.pendingRequests)) : null,
+    );
+  const body = h('div', { class: 'account-body settings-body' });
   mount(
     root,
-    pageHeader('Administration', [], [[store.me.org.name]]),
-    h('div', { class: 'tabs' }, TABS.map(([id, label, ic]) => h('a', { href: `#/admin/${id}`, class: `tab${tab === id ? ' active' : ''}` }, icon(ic, 14), label))),
-    body,
+    pageHeader('Company settings', [], [[store.me.org.name]]),
+    h(
+      'div',
+      { class: 'account-layout' },
+      h(
+        'nav',
+        { class: 'side-nav', 'aria-label': 'Company settings' },
+        SECTIONS.map(([id, label, ic]) => [navItem(id, label, ic), id === 'modules' ? extra.map((t) => navItem(t.id, t.label, t.icon, true)) : null]),
+      ),
+      body,
+    ),
   );
-  const views = { company, members, teams, invites, appearance, modules };
+  const views = { company, members, teams, invites, appearance, modules, ...Object.fromEntries(extra.map((t) => [t.id, t.view])) };
   const reload = () => adminView(root, { params });
   if (params.teamId) return teamDetail(body, params.teamId);
-  return (views[tab] || company)(body, reload);
+  return views[current](body, reload);
 }
 
 // ------------------------------------------------------------------ company
@@ -225,9 +250,21 @@ function requestsSection(requests, allTeams, reload) {
 }
 
 // ------------------------------------------------------------------ modules
-// What this Rewind has installed. Required modules are always on.
+// What this Rewind has installed. Required modules are always on; the others are turned on
+// or off for the whole company (their pages and menu items come and go with them).
 async function modules(root) {
   const { modules: list } = await get('/api/org/modules');
+  const toggle = async (m, input) => {
+    input.disabled = true;
+    const r = await attempt(() => patch(`/api/org/modules/${m.id}`, { enabled: input.checked }), `${m.name} turned ${input.checked ? 'on' : 'off'}`);
+    if (!r) input.checked = !input.checked;
+    else {
+      await loadMe();
+      window.dispatchEvent(new HashChangeEvent('hashchange')); // redraws the menu
+      return;
+    }
+    input.disabled = false;
+  };
   mount(
     root,
     section(
@@ -236,27 +273,22 @@ async function modules(root) {
       h(
         'div',
         { class: 'panel list-panel' },
-        list.map((m) =>
-          h(
+        list.map((m) => {
+          const input = h('input', { type: 'checkbox', name: `module-${m.id}`, checked: m.enabled, disabled: m.required, 'aria-describedby': `module-${m.id}-hint`, onChange: () => toggle(m, input) });
+          return h(
             'div',
             { class: 'list-row module-row' },
             h(
               'label',
               { class: `switch${m.required ? ' locked' : ''}`, title: m.required ? `${m.name} can't be turned off for now` : undefined },
-              h('input', { type: 'checkbox', name: `module-${m.id}`, checked: m.enabled, disabled: m.required, 'aria-describedby': `module-${m.id}-hint` }),
+              input,
               h('span', { class: 'switch-ui' }),
-              h(
-                'span',
-                {},
-                h('strong', {}, m.name),
-                h('span', { class: 'muted small block', id: `module-${m.id}-hint` }, m.description),
-              ),
+              h('span', {}, h('strong', {}, m.name), h('span', { class: 'muted small block', id: `module-${m.id}-hint` }, m.description)),
             ),
-            m.required ? badge('Always on', 'neutral', 'lock') : null,
-          ),
-        ),
+            m.required ? badge('Always on', 'neutral', 'lock') : m.enabled ? badge('On', 'success', 'check') : badge('Off'),
+          );
+        }),
       ),
-      list.every((m) => m.required) ? h('p', { class: 'muted small', style: { marginTop: '10px' } }, 'Retro is the only module for now, so it stays on. New modules will show up here to turn on or off.') : null,
     ),
   );
 }

@@ -38,10 +38,13 @@ const persist = () =>
     await mkdir(dirname(dataFile), { recursive: true });
     await writeFile(dataFile, JSON.stringify(Object.fromEntries(mem.data)));
   }));
+// every write goes to the file: put, delete and the partial updates (patch, touch)
 const storage = {
   ...mem,
   put: async (...a) => (await mem.put(...a), persist()),
   delete: async (...a) => (await mem.delete(...a), persist()),
+  patch: async (...a) => (await mem.patch(...a), persist()),
+  touch: async (...a) => (await mem.touch(...a), persist()),
 };
 
 // live updates inside this process (one Node server = one set of connected browsers)

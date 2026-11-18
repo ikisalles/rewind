@@ -24,7 +24,7 @@ import { durableRealtime } from '@rewind/core/realtime/durable';
 import { createRewind, SHARDS } from '../index.js';
 
 // Durable Object classes hosted by this function (bound through environment variables):
-//   REWIND_ROOMS = durable-object:RewindRoom    live updates, one room per sprint
+//   REWIND_ROOMS = durable-object:RewindRoom    live updates, one room per channel (sprint, change, company's change lists)
 //   REWIND_STORE = durable-object:RewindStore   the data, one object per owner (sprint, board, company, global)
 export { RewindRoom } from '@rewind/core/realtime/room';
 export { RewindStore } from '@rewind/core/storage/durable';

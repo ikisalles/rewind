@@ -49,6 +49,9 @@ export function footer() {
 //     styles: ['retro.css'],                         // relative to the module's web folder
 //     routes: [['/boards', boardsView], ['/s/:token', publicView, { public: true, bare: true }]],
 //     nav: [{ href: '#/boards', label: 'Boards', icon: 'board' }],
+//     navSection: 'Change management',              // optional: the menu items get their own section
+//     admin: [{ id: 'gmuds', label: 'GMUDs', icon: 'change', view: (root, reload) => {} }], // optional:
+//                                                    //   tabs in Administration (admins only, while the module is on)
 //     home: {                                        // optional widgets for the home page; ctx = { data, refresh }
 //       actions: (ctx) => [nodes],                   //   buttons next to the greeting
 //       metrics: (ctx) => [[label, value, unit?]],   //   tiles in "Overview"
@@ -60,5 +63,10 @@ export function footer() {
 
 export function defineWebModule(mod) {
   if (!mod?.id) throw new Error('A web module needs an id');
-  return Object.freeze({ routes: [], nav: [], styles: [], home: {}, ...mod, base: `./modules/${mod.id}/` });
+  return Object.freeze({ routes: [], nav: [], styles: [], home: {}, admin: [], ...mod, base: `./modules/${mod.id}/` });
+}
+
+// Administration tabs added by the modules the company has on.
+export function moduleAdminTabs(modules) {
+  return modules.filter((m) => store.me?.modules?.includes(m.id)).flatMap((m) => m.admin);
 }

@@ -2,5 +2,6 @@
 // reachable as @rewind/<id>/... through the import map (see scripts/web-layout.mjs).
 // To add one: add it to apps/web/package.json "dependencies" and import it here.
 import retro from '@rewind/retro/index.js';
+import gmud from '@rewind/gmud/index.js';
 
-export const MODULES = [retro];
+export const MODULES = [retro, gmud];

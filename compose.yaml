@@ -1,11 +1,16 @@
 name: rewind
 
 # docker compose up                           -> Rewind at http://localhost:8787 (data in the rewind-data volume)
+# docker compose --profile dev up dev         -> development: your code, API restarts on every change
 # docker compose --profile test run --rm test -> runs the tests
+#
+# Every service rebuilds the image when it starts (pull_policy: build), so it always runs the code
+# you have: an old "rewind" image is never reused by mistake. Rebuilds use Docker's cache: fast.
 services:
   rewind:
     build: .
     image: rewind
+    pull_policy: build
     ports:
       - "${PORT:-8787}:8787"
     env_file:
@@ -22,6 +27,7 @@ services:
   dev:
     image: rewind
     build: .
+    pull_policy: build
     profiles: ["dev"]
     command: ["node", "apps/api/node/dev.js"]
     ports:
@@ -42,6 +48,7 @@ services:
   test:
     image: rewind
     build: .
+    pull_policy: build
     profiles: ["test"]
     command: ["npm", "test"]
     volumes:

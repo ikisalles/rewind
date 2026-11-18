@@ -241,6 +241,8 @@ input[type=color] { width: 32px; height: 28px; padding: 0; border: 1px solid var
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .modal-head h2 { font-size: 15px; }
 .modal-body { padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+/* long content scrolls the window instead of squeezing tables and lists */
+.modal-body > * { flex-shrink: 0; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); flex-wrap: wrap; }
 .modal-foot .btn-danger-ghost { margin-right: auto; }
 @keyframes fade { from { opacity: 0; } }
@@ -269,6 +271,9 @@ input[type=color] { width: 32px; height: 28px; padding: 0; border: 1px solid var
 .integration-card:hover { border-color: var(--accent); }
 .integration-card .grow { flex: 1; min-width: 0; }
 .account-body .form-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+/* company settings: same layout, but tables need the full width */
+.account-body.settings-body { max-width: none; }
+.side-item .count-pill { margin-left: auto; }
 @media (max-width: 720px) {
   .account-layout { grid-template-columns: 1fr; }
   .side-nav { flex-direction: row; flex-wrap: wrap; }

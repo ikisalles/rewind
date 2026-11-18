@@ -24,8 +24,8 @@ function setup(env = {}) {
 
 const bootstrap = signupCompany;
 
-test('the API ships the retro module', async () => {
-  assert.deepEqual(MODULES.map((m) => m.id), ['retro']);
+test('the API ships the retro and changes (GMUD) modules; GMUD starts off', async () => {
+  assert.deepEqual(MODULES.map((m) => m.id), ['retro', 'gmud']);
   const { call } = setup();
   const { admin } = await bootstrap(call);
   const dash = (await call('GET', '/api/dashboard', null, admin)).data;
@@ -101,12 +101,18 @@ test('same company name: request waits for admin approval', async () => {
 });
 
 
-test('Administration → Modules: admins see the installed modules; retro is required', async () => {
+test('Administration → Modules: admins see the installed modules; retro is required, GMUD optional', async () => {
   const { call } = setup();
   const { admin, bia } = await bootstrap(call);
   const r = await call('GET', '/api/org/modules', null, admin);
   assert.equal(r.status, 200);
-  assert.deepEqual(r.data.modules.map(({ id, enabled, required }) => ({ id, enabled, required })), [{ id: 'retro', enabled: true, required: true }]);
-  assert.ok(r.data.modules[0].name && r.data.modules[0].description);
+  assert.deepEqual(r.data.modules.map(({ id, enabled, required }) => ({ id, enabled, required })), [
+    { id: 'retro', enabled: true, required: true },
+    { id: 'gmud', enabled: false, required: false },
+  ]);
+  assert.ok(r.data.modules.every((m) => m.name && m.description));
   assert.equal((await call('GET', '/api/org/modules', null, bia)).status, 403);
+  const on = await call('PATCH', '/api/org/modules/gmud', { enabled: true }, admin);
+  assert.equal(on.data.modules[1].enabled, true);
+  assert.deepEqual((await call('GET', '/api/dashboard', null, bia)).data.modules, ['retro', 'gmud']);
 });

@@ -278,3 +278,25 @@ test('personal integrations: tokens are sealed, never returned, and kept per per
   assert.deepEqual([left.github.configured, left.jira.configured], [false, true]);
   assert.equal((await call('GET', '/api/me/integrations')).status, 401);
 });
+
+test('module system: admins turn optional modules on and off per company', async () => {
+  const mk = (id, extra = {}) => defineModule({ id, name: id.toUpperCase(), ...extra, register: (core) => (core.route('GET', `/api/${id}/ping`, async () => json({ id })), { dashboard: async () => ({ id }) }) });
+  const { call } = setupApp({ modules: [mk('base', { required: true }), mk('extra'), mk('later', { defaultEnabled: false })] });
+  const { admin, bia } = await signupCompany(call);
+
+  assert.deepEqual((await call('GET', '/api/me', null, bia)).data.modules, ['base', 'extra']);
+  assert.equal((await call('GET', '/api/later/ping', null, bia)).status, 404);
+  assert.equal((await call('GET', '/api/extra/ping', null, bia)).status, 200);
+
+  assert.equal((await call('PATCH', '/api/org/modules/base', { enabled: false }, admin)).status, 400);
+  assert.equal((await call('PATCH', '/api/org/modules/extra', { enabled: false }, bia)).status, 403);
+  const off = await call('PATCH', '/api/org/modules/extra', { enabled: false }, admin);
+  assert.deepEqual(off.data.modules.map((m) => [m.id, m.enabled]), [['base', true], ['extra', false], ['later', false]]);
+  await call('PATCH', '/api/org/modules/later', { enabled: true }, admin);
+
+  assert.deepEqual((await call('GET', '/api/me', null, bia)).data.modules, ['base', 'later']);
+  assert.equal((await call('GET', '/api/extra/ping', null, bia)).status, 404);
+  assert.equal((await call('GET', '/api/later/ping', null, bia)).status, 200);
+  const dash = (await call('GET', '/api/dashboard', null, bia)).data;
+  assert.deepEqual([dash.modules, dash.extra, dash.later], [['base', 'later'], undefined, { id: 'later' }]);
+});

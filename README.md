@@ -19,8 +19,8 @@ Rewind is an open source tool for agile retrospectives. It is designed to run on
 | Social sign-in | The first sign-in from a domain creates the company and makes that person the admin. Rewind then asks whether other `@domain` accounts may join automatically. |
 | Automatic teams | Provider groups (Google Workspace, Microsoft Entra ID, GitHub teams) become Rewind teams. Without groups, the person joins the default team. |
 | Invites | For manually created companies, or when automatic sign-in is off, the admin invites people by email and picks their team and role. The link can be copied; the email is sent if Resend is configured. |
-| Teams | Administration → Teams lists the teams; open one to see its members, remove someone or add a person who is already in the company. |
-| Same company name | Registering a company name that already exists (ignoring case, accents and extra spaces) doesn't create a duplicate: the request waits for approval. The person who registered the company gets an email and every admin sees the request in Administration → Members (and on the dashboard). Approved people join as members of the teams the admin picks, so they only see those teams' boards. Denied people get an email and can't register that company again; registering a different company name reactivates their sign-up. |
+| Teams | Company settings → Teams lists the teams; open one to see its members, remove someone or add a person who is already in the company. |
+| Same company name | Registering a company name that already exists (ignoring case, accents and extra spaces) doesn't create a duplicate: the request waits for approval. The person who registered the company gets an email and every admin sees the request in Company settings → Members (and on the dashboard). Approved people join as members of the teams the admin picks, so they only see those teams' boards. Denied people get an email and can't register that company again; registering a different company name reactivates their sign-up. |
 | My account | The avatar in the header opens *My account*: basic info (name, email, company, role; read-only for now) and *Integrations*, where each person saves their own Jira (site, email, API token) and GitHub (personal access token) tokens. Tokens are write-only: the API only returns their last 4 characters, and they are encrypted with `SECRETS_KEY` when it is set. |
 | Retro | Boards per team → sprints with start and end dates → configurable columns → sticky notes from each member. |
 | Templates | When creating a sprint, pick a format (Start/Stop/Continue, 4Ls, Mad/Sad/Glad, Sailboat, Starfish, Rose/Thorn/Bud or Classic) or start blank and add the columns yourself. Each column can have a prompt shown in the note box. A template can also be applied later from the board (*Template*). |
@@ -37,6 +37,10 @@ Rewind is an open source tool for agile retrospectives. It is designed to run on
 
 The default look is a dark console: near-black background, surfaces with subtle borders, orange accent,
 Inter font and Roboto Mono in the footer.
+
+Admins have one menu entry, **Company settings** (`#/admin`), laid out like *My account*: a menu on the
+left (Company, Modules with each module's own settings under it, Members, Teams, Invites, Appearance) and
+the section on the right. Pending access requests show as a count on the menu entry and on Members.
 
 ## Structure
 
@@ -55,6 +59,10 @@ modules/
     server/index.js       routes: boards, sprints, notes, votes, merge, action items, share links
     web/                  views, menu items, home widgets and retro.css (served at /modules/retro/)
     test/                 module tests
+  gmud/                 @rewind/gmud — change management (GMUD): changes, approvals, releases, deployments
+    server/               routes (index.js), model.js (sections, workflow, approvals), semver.js, github.js, notes.js
+    web/                  Changes, Releases, Deployments, approval settings and home widgets (gmud.css)
+    test/                 module tests (GitHub is mocked)
 apps/
   api/                  @rewind/api — core + enabled modules (index.js) and the runtimes:
     node/                 local server (server.js) and development watcher (dev.js)
@@ -110,6 +118,8 @@ export default defineWebModule({
   routes: [['/polls', pollsView]],
   nav: [{ href: '#/polls', label: 'Polls', icon: 'list' }],
   home: { metrics: ({ data }) => [['Open polls', data.polls.open]], sections: (ctx) => [] },
+  navSection: 'Polls',                                             // optional: own section in the menu
+  admin: [{ id: 'polls', label: 'Polls', icon: 'list', view: (root, reload) => {} }], // optional: Administration tab
 });
 ```
 
@@ -123,8 +133,76 @@ export default defineWebModule({
 The web shell serves each enabled module at `/modules/<id>/` and adds it to the import map; the home page
 only shows widgets of modules the API reports as enabled.
 
-Admins see the installed modules in **Administration → Modules** (`GET /api/org/modules`). A module declares
-`required: true` when a company can't turn it off; Retro is required for now, as it is the only module.
+Admins see the installed modules in **Company settings → Modules** (`GET /api/org/modules`) and turn optional
+ones on or off for the company (`PATCH /api/org/modules/<id>` `{ enabled }`, stored in `org.modules`). A module
+declares `required: true` when a company can't turn it off (Retro), and `defaultEnabled: false` to start off
+until an admin turns it on (GMUD). While a module is off, its routes answer 404, its menu items and pages are
+hidden and it is left out of `/api/dashboard`. `GET /api/me` lists the modules on for the company.
+
+## Changes (GMUD) module
+
+Change management for software (`modules/gmud`). Rewind is the **system of record and approval**: it
+records changes, approvals, releases and deployments, but doesn't trigger deployments. Change, Release and
+Deployment are separate entities, so triggering deployments can be added later without reshaping the data.
+Turn it on in **Company settings → Modules**.
+
+| Page | What it does |
+| --- | --- |
+| Changes | Indicators for a period (total, waiting for approval, approved/scheduled, in progress, completed, failed/rolled back), filters (status, SemVer type, category, repository, responsible, environment, risk, search) and the table, with an **Approvers** column: per required approval, the groups/people who can decide, or who decided (and for which group); drafts show the approvals they will need. |
+| New change | A draft is created at once (`CHG-YYYY-NNNN`, never changes) and filled in five steps that save themselves: Overview (title, category, priority, owner, team, environment, window) · Code & Changes (repositories, PRs, versions and the one description of the change) · Risk & Testing (risk level, tests, rollback) · Execution · Approval (review and submit). Nothing is asked before the step it depends on: the change type comes from the repositories' increments (the highest wins) and the risk level from the likelihood × impact matrix (or set by hand in that step). |
+| Details | Tabs Overview, Code Changes, Risk & Testing, Execution, Approvals and Activity Log, with the actions the status allows. |
+| Document | The change laid out as a document (A4): identification, description, repositories and PRs, impact and risk, testing, rollback, execution plan and approvals. Before submitting, the last step of the form opens it as a preview and **Submit for approval** is there. Any time: **Save as PDF** (the browser's print dialog, only the document is printed) or **Download Word** (`.doc`). |
+| Releases | One release per repository is planned when a change is approved (version, previous version, notes generated from the PRs, editable); released when the change completes. |
+| Deployments | Registered per environment from a change; status history. A deployment that starts moves the change to *in progress*; a failed deployment doesn't invalidate its releases. |
+| Company settings → GMUDs | Admins only, shown while the module is on. Approvers per role (technical, change, security): people and/or groups — teams, which can come from Google/Microsoft/GitHub groups — and anyone in a listed group can decide (nothing listed = any admin; decisions record the group they were made for), when each is required (environments, minimum risk, categories), self-approval, and the SemVer suggestion policy. |
+
+**Workflow**: Draft → Submitted → In review → Approved / Rejected → Scheduled → In progress → Completed /
+Failed / Rolled back, plus Cancelled, Withdraw (back to draft) and Revise (a rejected change back to draft).
+Only drafts can be edited. Requesters can't approve their own changes (unless the company allows it);
+rejecting needs a reason.
+
+**Submitting** requires the overview fields, at least one repository with a **confirmed** next version, a
+description, the likelihood × impact of a failure (risk = matrix: low/medium/high/critical, or set by hand), and for
+production a rollback plan or why it doesn't apply.
+
+**SemVer**: version per repository, with pre-release and build metadata (`2.4.0-rc.1`, `2.4.0+build.5`). The
+increment is suggested from the PRs (labels `semver:major|minor|patch`, breaking labels, Conventional
+Commits titles, policy default) and the highest wins; the suggestion is never applied silently: the
+person confirms each version, and changing the version drops the confirmation.
+
+**GitHub**: each person connects their own token in **My account → Integrations → GitHub**. Rewind only
+reads. A fine-grained token needs, on the organization that owns the repositories, read-only **Metadata**
+(always on), **Contents** (branches, releases, compare), **Pull requests** (PRs, reviews, commits, files)
+and **Commit statuses** (CI status); **Checks** read-only too if offered (check runs). A classic token needs
+`repo` (or `public_repo`) and `read:org`. The Code & Changes step has a "Which permissions does the token
+need?" link that explains this step by step. A change can include several repositories. From the Code & Changes step
+they paste pull request links from any repositories at once (`https://github.com/o/r/pull/12` or `o/r#12`),
+or import a repository's scope three ways: a GitHub Release (every PR since the release before it),
+a comparison of two branches/tags, or picked PRs, and go on with the next repository. Imported per PR: number, title, link, description,
+author, reviewers and approvals, merge date and branches, commits, labels, changed files, checks and
+statuses, and the issues it closes. The latest published version comes from the latest release (or the
+highest SemVer tag). The description (one per change) can be generated from the PRs of every repository and is then marked
+as a generated suggestion; it is built from titles and labels (no AI provider is wired in).
+
+**Storage**: each change has its own Durable Object (`gmud:<changeId>`) holding everything about it: the
+change with all its sections and PRs, its activity log, its releases (notes) and deployments (history).
+The company's object only keeps light summaries for the lists and the home page (`chgidx:`, `relidx:`,
+`depidx:`), the `CHG-YYYY-NNNN` sequence and the approval settings. Lists never open each change's
+object; a change's page only talks to its own. Changes saved in the earlier company-wide layout move to
+their own objects the first time the company's changes are read. Locally (Node/Docker) the same keys go
+to the JSON file.
+
+**Live updates**: the change page and the Changes, Releases and Deployments lists update by themselves
+(about a second) when anyone approves, rejects, comments, changes the status, edits a draft or registers a
+deployment. Same mechanism as the retro: WebSocket rooms on Durable Objects (in-process on Node/Docker),
+one room per change (`gmud:<changeId>`) and one per company for the lists (`gmud-org:<orgId>`); messages
+only say "it changed" and the browser reloads through the API. Pages wait while someone types or has a
+window open, and fall back to polling when real-time isn't available. The shared client is
+`apps/web/assets/js/live.js` (`@rewind/web/live.js`), used by the retro too.
+
+The Activity Log records who did what and when: field edits (old → new values; autosaves of a section by the
+same person within 10 minutes are one entry), submissions, decisions, comments, checklist steps,
+releases and deployments.
 
 ## Dashboard API
 
@@ -166,7 +244,7 @@ Other useful commands:
 | --- | --- |
 | `docker compose --profile dev up dev` | Development mode: uses the code on your machine and restarts the API on every change in `packages/`, `modules/` or `apps/api/`. The frontend has no build step, so just reload the browser. |
 | `docker compose --profile test run --rm test` | Runs the tests. |
-| `docker compose up -d --build` | Rebuilds the image after changing the code (normal mode). |
+| `docker compose up -d --build` | Forces a rebuild. Not needed with a recent Compose: every service has `pull_policy: build`, so `up` rebuilds the image from your code (using Docker's cache). |
 | `docker compose down -v` | Stops everything and **deletes the data** (the `rewind-data` volume). |
 | `PORT=3000 docker compose up -d` | Uses another host port. If you use social sign-in, set `APP_URL` too. |
 
@@ -179,6 +257,10 @@ docker run --rm rewind npm test
 ```
 
 (Without a `.env` file, drop `--env-file .env`.)
+
+When it starts, the container links every workspace in `packages/`, `modules/` and `apps/` into
+`node_modules` (`scripts/link-workspaces.mjs`), so a module added after the image was built, or code mounted
+by the `dev`/`test` services, still loads.
 
 The image is based on `node:22-alpine`, runs as an unprivileged user and stores data in `/app/.data/rewind.json`,
 inside the volume. This mode is meant for development and small installs; in production, prefer

@@ -5,6 +5,7 @@
   "license": "MIT",
   "private": true,
   "dependencies": {
-    "@rewind/retro": "*"
+    "@rewind/retro": "*",
+    "@rewind/gmud": "*"
   }
 }

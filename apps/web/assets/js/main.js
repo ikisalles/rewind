@@ -29,7 +29,8 @@ const routes = [
   ['/account', accountView],
   ['/account/:section', accountView],
   ['/account/integrations/:provider', accountView],
-  ...MODULES.flatMap((m) => m.routes),
+  // a module's pages only open when the company has the module on (see Administration → Modules)
+  ...MODULES.flatMap((m) => m.routes.map(([p, view, opts = {}]) => [p, view, { ...opts, module: m.id }])),
 ];
 const aliases = MODULES.flatMap((m) => m.aliases || []);
 
@@ -84,6 +85,11 @@ async function render() {
     }
   }
 
+  if (found.opts.module && !store.me.modules?.includes(found.opts.module)) {
+    location.hash = '#/home';
+    return;
+  }
+
   const content = h('main', { class: 'content' });
   mount(app, shell(content, path));
   cleanup = await found.view(content, { params: found.params, query });
@@ -101,6 +107,7 @@ function shell(content, path) {
   const { user, org } = store.me;
   const isAdmin = user.role === 'admin';
   const drawer = h('nav', { class: 'drawer', 'aria-label': 'Main menu' });
+  const enabled = MODULES.filter((m) => store.me.modules?.includes(m.id));
 
   const item = (href, label, iconName, count = 0) =>
     h(
@@ -113,17 +120,15 @@ function shell(content, path) {
 
   mount(
     drawer,
-    h('div', { class: 'drawer-section' }, 'Navigation'),
+    h('div', { class: 'drawer-section' }, 'Workspace'),
     item('#/home', 'Home', 'home'),
-    MODULES.flatMap((m) => m.nav.map((n) => item(n.href, n.label, n.icon))),
+    // modules without a navSection go under Workspace; the others get their own section
+    enabled.filter((m) => !m.navSection).flatMap((m) => m.nav.map((n) => item(n.href, n.label, n.icon))),
+    enabled.filter((m) => m.navSection).map((m) => [h('div', { class: 'drawer-section' }, m.navSection), m.nav.map((n) => item(n.href, n.label, n.icon))]),
     isAdmin && [
       h('div', { class: 'drawer-section' }, 'Administration'),
-      item('#/admin/company', 'Company', 'building'),
-      item('#/admin/modules', 'Modules', 'modules'),
-      item('#/admin/members', 'Members', 'user', store.me.pendingRequests),
-      item('#/admin/teams', 'Teams', 'team'),
-      item('#/admin/invites', 'Invites', 'mail'),
-      item('#/admin/appearance', 'Appearance', 'palette'),
+      // one entry: every company setting lives in that page (see views/admin.js)
+      item('#/admin', 'Company settings', 'settings', store.me.pendingRequests),
     ],
   );
 
@@ -170,7 +175,7 @@ function maybeOnboarding() {
       { class: 'stack' },
       h('p', {}, 'We created the company ', h('strong', {}, org.name), ' from your account.'),
       h('p', {}, 'Should other people with an ', h('strong', {}, `@${org.domain}`), ' email join automatically when they sign in, straight into their group\'s team?'),
-      h('p', { class: 'muted small' }, 'You can change this later in Administration → Company.'),
+      h('p', { class: 'muted small' }, 'You can change this later in Company settings → Company.'),
     ),
     actions: [
       button('No, invite only', { onClick: () => answer(false) }),
