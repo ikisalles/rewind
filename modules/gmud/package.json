@@ -1,0 +1,18 @@
+{
+  "name": "@rewind/gmud",
+  "version": "0.1.0",
+  "description": "Rewind module: change management (GMUD) for software — changes, approvals, SemVer releases per repository and deployments, with GitHub import.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    "./server": "./server/index.js"
+  },
+  "rewind": {
+    "web": "./web",
+    "entry": "./web/index.js"
+  },
+  "peerDependencies": {
+    "@rewind/core": "*"
+  }
+}

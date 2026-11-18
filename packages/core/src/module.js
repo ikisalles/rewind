@@ -5,6 +5,7 @@
 //     name: 'Retro',
 //     description: 'Agile retrospectives', // shown in Administration → Modules
 //     required: true,                    // can't be turned off by a company (default false)
+//     defaultEnabled: true,              // optional modules: on until an admin turns them off (default true)
 //     keyPrefixes: ['board:'],           // storage keys that should exist when looked up by id/token;
 //                                        //   on eventually consistent stores a miss is read again
 //     shards: { note: 'sprint' },        // on Durable Object storage, which object owns each key kind:

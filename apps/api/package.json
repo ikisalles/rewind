@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@rewind/core": "*",
-    "@rewind/retro": "*"
+    "@rewind/retro": "*",
+    "@rewind/gmud": "*"
   }
 }

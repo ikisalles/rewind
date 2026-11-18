@@ -26,4 +26,7 @@ EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
   CMD wget -qO- http://127.0.0.1:8787/api/config >/dev/null || exit 1
 
+# Links the workspaces again on start: modules added after the image was built, or code mounted by
+# the dev/test services, still resolve by package name (@rewind/<id>).
+ENTRYPOINT ["sh", "-c", "node scripts/link-workspaces.mjs && exec \"$@\"", "--"]
 CMD ["node", "apps/api/node/server.js"]

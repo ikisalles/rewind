@@ -9,7 +9,7 @@
 //   const response = await app.fetch(request);
 
 import { createRouter, corsHeaders, fail, HttpError, json, readJson, redirect } from './lib/http.js';
-import { hashPassword, newId, randomToken, sealSecret, verifyPassword } from './lib/crypto.js';
+import { hashPassword, newId, openSecret, randomToken, sealSecret, verifyPassword } from './lib/crypto.js';
 import { authorizeUrl, enabledProviders, exchangeCode, PROVIDERS, PUBLIC_DOMAINS } from './auth/providers.js';
 import { escapeHtml, isColor, isEmail, normalizeOrgName, now, str } from './util.js';
 import { readYourWrites } from './storage/consistency.js';
@@ -487,7 +487,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
   route('GET', '/api/me', async (c) => {
     const teams = await db.list(K.teams(c.org.id));
     const pendingRequests = isAdmin(c) ? (await pendingJoinRequests(c.org.id)).length : 0;
-    return json({ user: c.user, org: c.org, teams, pendingRequests });
+    return json({ user: c.user, org: c.org, teams, pendingRequests, modules: enabledModules(c.org).map((m) => m.id) });
   });
 
   // ------------------------------------------------------------ join requests (admin)
@@ -777,7 +777,16 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
   // ------------------------------------------------------------ module system
   // What a module gets from the platform. Modules keep their own storage keys
   // and only reach core data through these services.
-  const services = Object.freeze({
+  // A person's own integration (My account → Integrations), token readable, for modules that
+  // call third-party APIs on their behalf. null when not connected.
+  async function integrationFor(c, provider) {
+    const entry = (await db.get(K.integrations(c.org.id, c.user.id)))?.[provider];
+    if (!entry) return null;
+    const { token, tokenHint, ...rest } = entry;
+    return { ...rest, token: await openSecret(token, env.SECRETS_KEY) };
+  }
+
+  const services = {
     db,
     env,
     route: (method, path, fn, opts) => route(method, path, fn, opts),
@@ -808,22 +817,43 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     listTeams: (orgId) => db.list(K.teams(orgId)),
     listUsers: (orgId) => db.list(K.users(orgId)),
     teamMembers,
-  });
+    integrationFor,
+  };
+
+  // A company turns optional modules on or off (org.modules = { <id>: true | false });
+  // required modules are always on, the others follow their defaultEnabled until an admin decides.
+  const isEnabled = (org, m) => m.required || (org?.modules?.[m.id] ?? m.defaultEnabled !== false);
+  const enabledModules = (org) => loaded.filter((m) => isEnabled(org, m));
 
   const loaded = [];
   const seen = new Set();
   for (const mod of modules) {
     if (seen.has(mod.id)) throw new Error(`Module "${mod.id}" registered twice`);
     seen.add(mod.id);
-    loaded.push({ id: mod.id, name: mod.name, description: mod.description, required: mod.required, ...(mod.register(services) || {}) });
+    // the module's signed-in routes answer 404 for companies that turned it off
+    const guarded = (fn) => async (c) => (c.org && !isEnabled(c.org, mod) ? fail(404, `${mod.name} is turned off for your company`) : fn(c));
+    const own = Object.freeze({ ...services, route: (method, path, fn, opts = {}) => route(method, path, opts.public ? fn : guarded(fn), opts) });
+    loaded.push({ id: mod.id, name: mod.name, description: mod.description, required: mod.required, defaultEnabled: mod.defaultEnabled, ...(mod.register(own) || {}) });
   }
 
-  // Administration → Modules. Every installed module is on; required ones can't be turned off.
+  // Administration → Modules. Required modules can't be turned off.
+  const moduleList = (org) =>
+    loaded.map((m) => ({ id: m.id, name: m.name, description: m.description, enabled: isEnabled(org, m), required: Boolean(m.required) }));
+
   route('GET', '/api/org/modules', async (c) => {
     requireAdmin(c);
-    return json({
-      modules: loaded.map((m) => ({ id: m.id, name: m.name, description: m.description, enabled: true, required: Boolean(m.required) })),
-    });
+    return json({ modules: moduleList(c.org) });
+  });
+
+  route('PATCH', '/api/org/modules/:id', async (c) => {
+    requireAdmin(c);
+    const m = loaded.find((x) => x.id === c.params.id);
+    if (!m) fail(404, 'Module not found');
+    if (m.required) fail(400, `${m.name} can't be turned off`);
+    const enabled = Boolean(c.body.enabled);
+    c.org.modules = { ...(c.org.modules || {}), [m.id]: enabled };
+    await db.patch(K.org(c.org.id), { modules: { [m.id]: enabled } });
+    return json({ modules: moduleList(c.org) });
   });
 
   // ------------------------------------------------------------ dashboard
@@ -845,13 +875,13 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
 
   route('GET', '/api/dashboard', async (c) => {
     const [parts, admin] = await Promise.all([
-      Promise.all(loaded.map(async (m) => [m, m.dashboard ? await m.dashboard(c) : undefined])),
+      Promise.all(enabledModules(c.org).map(async (m) => [m, m.dashboard ? await m.dashboard(c) : undefined])),
       isAdmin(c) ? coreAdminDashboard(c) : null,
     ]);
-    const out = { modules: loaded.map((m) => m.id), admin };
+    const out = { modules: enabledModules(c.org).map((m) => m.id), admin };
     for (const [m, data] of parts) if (data !== undefined) out[m.id] = data;
     if (admin) {
-      for (const m of loaded) {
+      for (const m of enabledModules(c.org)) {
         if (!m.adminDashboard) continue;
         const { onboarding = {}, ...rest } = (await m.adminDashboard(c)) || {};
         Object.assign(admin.onboarding, onboarding);

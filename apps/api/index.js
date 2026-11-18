@@ -7,8 +7,9 @@
 
 import { createApp, CORE_SHARDS } from '@rewind/core';
 import retro from '@rewind/retro/server';
+import gmud from '@rewind/gmud/server';
 
-export const MODULES = [retro];
+export const MODULES = [retro, gmud];
 
 // Which Durable Object owns each key kind (core + modules), for durableStorage().
 export const SHARDS = Object.assign({}, CORE_SHARDS, ...MODULES.map((m) => m.shards));
