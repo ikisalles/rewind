@@ -454,7 +454,7 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     if (!invite) fail(404, 'Invalid or expired invite');
     const org = await db.get(K.org(invite.orgId));
     const team = invite.teamId && (await db.get(K.team(org.id, invite.teamId)));
-    return json({ email: invite.email, orgName: org.name, teamName: team?.name ?? null });
+    return json({ email: invite.email, orgName: org.name, teamName: team?.name ?? null, role: invite.role === 'admin' ? 'admin' : 'member' });
   }, { public: true });
 
   route('POST', '/api/invites/:token/accept', async ({ params, body }) => {
