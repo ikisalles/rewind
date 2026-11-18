@@ -727,6 +727,19 @@ export default defineModule({
         const overdue = list.filter((ch) => ['approved', 'scheduled'].includes(ch.status) && ch.plannedAt && ch.plannedAt < nowLocal);
         return { overdue };
       },
+      // two teams became one: changes and approver groups follow the team that stays
+      onTeamMerge: async (orgId, fromId, intoId) => {
+        for (const x of await listIndex(orgId)) {
+          if (x.teamId !== fromId) continue;
+          const change = await db.get(K.change(x.id));
+          if (change) await save(change, { overview: { ...change.overview, teamId: intoId } });
+        }
+        const saved = await db.get(K.settings(orgId));
+        if (saved?.approverTeams) {
+          const approverTeams = Object.fromEntries(Object.entries(saved.approverTeams).map(([role, ids]) => [role, [...new Set(ids.map((t) => (t === fromId ? intoId : t)))]]));
+          await db.patch(K.settings(orgId), { approverTeams });
+        }
+      },
       beforeTeamDelete: async (c, teamId) => {
         const open = (await listIndex(c.org.id)).filter((ch) => ch.teamId === teamId && OPEN.includes(ch.status));
         if (open.length) fail(409, `This team has ${open.length} open change(s) (${open.slice(0, 3).map((ch) => ch.number).join(', ')}). Finish or move them first.`);

@@ -1,7 +1,8 @@
 // "My account": the signed-in person's own page. Basic info (read-only for now) and personal
 // integrations (Jira, GitHub), whose tokens are write-only: once saved, only their last
 // characters are shown.
-import { get, post, put, del, session } from '../api.js';
+import { get, post, put, del, patch, session } from '../api.js';
+import { THEMES, themeColors, applyTheme } from '../theme.js';
 import { h, mount, button, field, badge, avatar, attempt, confirmDialog, fmtDateTime, icon, pageHeader } from '../ui.js';
 import { store } from '../app.js';
 
@@ -28,6 +29,7 @@ const INTEGRATIONS = {
 const SECTIONS = [
   ['profile', 'Basic info', 'user'],
   ['integrations', 'Integrations', 'plug', Object.entries(INTEGRATIONS).map(([id, i]) => [`integrations/${id}`, i.name, i.icon])],
+  ['appearance', 'Appearance', 'palette'],
 ];
 
 export async function accountView(root, { params }) {
@@ -50,6 +52,7 @@ export async function accountView(root, { params }) {
     return integrationForm(body, params.provider);
   }
   if (current === 'integrations') return integrationsOverview(body);
+  if (current === 'appearance') return appearance(body);
   return profile(body);
 }
 
@@ -79,6 +82,88 @@ function profile(root) {
         h('dt', {}, 'Role'), h('dd', {}, user.role === 'admin' ? badge('Admin', 'accent') : badge('Member')),
       ),
       h('p', { class: 'muted small' }, icon('lock', 12), ' Editing these details is not available yet.'),
+    ),
+    managedNotice(),
+  );
+}
+
+// People who sign in through a provider (the company's SSO or Google/Microsoft/GitHub): their
+// account and groups come from there, not from Rewind.
+function managedNotice() {
+  const { managedBy, teams, user } = store.me;
+  if (!managedBy?.length) return null;
+  const how = managedBy.join(' and ');
+  const groupTeams = teams.filter((t) => t.groupKey && user.teamIds.includes(t.id));
+  return h(
+    'div',
+    { class: 'panel stack-sm managed-notice' },
+    h('div', { class: 'managed-head' }, icon('lock', 16), h('strong', {}, `Your account is managed by ${how}`)),
+    h('p', { class: 'small' }, `You sign in with ${how}. Your name, email and the groups you belong to come from there, not from Rewind: they are managed in ${how} by your company's administrators. A new name or new groups show up here the next time you sign in.`),
+    groupTeams.length
+      ? h('p', { class: 'small' }, 'Teams from your groups: ', groupTeams.map((t, i) => [i ? ', ' : '', h('strong', {}, t.name)]), '.')
+      : null,
+    h('p', { class: 'muted small' }, 'Leaving a group there doesn’t remove you from its team here: ask a Rewind admin.'),
+  );
+}
+
+// ------------------------------------------------------------------ appearance
+// Your theme, for you only. Picking one only marks it; it's applied when you save.
+function appearance(root) {
+  const saved = THEMES[store.me.user.theme] ? store.me.user.theme : 'dark';
+  let picked = saved;
+  const saveBtn = button('Save', { type: 'submit', variant: 'primary', disabled: true });
+  const cards = Object.entries(THEMES).map(([id, t]) =>
+    h(
+      'label',
+      { class: `theme-card${id === picked ? ' selected' : ''}`, 'data-theme-id': id },
+      h('input', { type: 'radio', name: 'theme', value: id, checked: id === picked, onChange: () => pick(id) }),
+      h('span', { class: 'theme-card-head' }, h('strong', {}, t.label), id === saved ? badge('Current', 'accent') : null),
+      themeThumbnail(themeColors(id)),
+    ),
+  );
+  const pick = (id) => {
+    picked = id;
+    for (const c of cards) c.classList.toggle('selected', c.dataset.themeId === id);
+    saveBtn.disabled = picked === saved;
+  };
+  const form = h(
+    'form',
+    {
+      class: 'panel stack',
+      onSubmit: async (e) => {
+        e.preventDefault();
+        const r = await attempt(() => patch('/api/me', { theme: picked }), `${THEMES[picked].label} theme applied`);
+        if (!r) return;
+        store.me.user.theme = picked;
+        applyTheme(picked);
+        appearance(root);
+      },
+    },
+    h('div', {}, h('h3', {}, 'Theme'), h('p', { class: 'muted small' }, 'Only for you: everyone in your company picks their own. It changes when you save.')),
+    h('div', { class: 'theme-grid', role: 'radiogroup', 'aria-label': 'Theme' }, cards),
+    h('div', { class: 'form-actions' }, saveBtn),
+  );
+  mount(root, form);
+}
+
+// A small picture of Rewind in a theme's colors: top bar, menu, a card with an accent button.
+function themeThumbnail(c) {
+  const line = (w, color = c.muted) => h('span', { class: 'tt-line', style: { width: w, background: color } });
+  return h(
+    'span',
+    { class: 'theme-thumb', style: { background: c.bg, borderColor: c.border }, 'aria-hidden': 'true' },
+    h('span', { class: 'tt-top', style: { background: c.bg, borderColor: c.border } }, h('span', { class: 'tt-logo', style: { background: c.text } }), h('span', { class: 'tt-avatar', style: { background: c.accent } })),
+    h(
+      'span',
+      { class: 'tt-body' },
+      h('span', { class: 'tt-menu', style: { background: c.surface, borderColor: c.border } }, h('span', { class: 'tt-item', style: { background: c.accent + '33' } }), line('70%'), line('55%'), line('62%')),
+      h(
+        'span',
+        { class: 'tt-main' },
+        line('40%', c.text),
+        h('span', { class: 'tt-card', style: { background: c.surface, borderColor: c.border } }, line('80%', c.text), line('60%'), line('45%', c.link), h('span', { class: 'tt-btn', style: { background: c.accent } })),
+        h('span', { class: 'tt-card', style: { background: c.surface2, borderColor: c.border } }, line('70%'), h('span', { class: 'tt-dots' }, h('span', { style: { background: c.success } }), h('span', { style: { background: c.danger } }))),
+      ),
     ),
   );
 }

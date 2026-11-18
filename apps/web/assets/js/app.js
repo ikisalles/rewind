@@ -15,7 +15,7 @@ export const store = { me: null };
 
 export async function loadMe() {
   store.me = await get('/api/me');
-  applyTheme(store.me.org.theme);
+  applyTheme(store.me.user.theme); // each person's own theme
   return store.me;
 }
 
@@ -37,7 +37,7 @@ export function footer() {
       h('a', { href: '#/home' }, 'Home'),
       h('a', { href: cfg.repoUrl || '#', target: '_blank', rel: 'noopener', class: 'btn btn-icon', 'aria-label': 'GitHub' }, icon('github')),
     ),
-    h('span', { class: 'status-line' }, SLOGAN.toUpperCase()),
+    h('span', { class: 'footer-slogan' }, SLOGAN),
   );
 }
 
