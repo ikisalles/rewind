@@ -1,0 +1,126 @@
+/* Foundation admin tables and small forms. Follows the shell palette. */
+
+.fdn-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.fdn-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fdn-card .fdn-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fdn-card .fdn-card-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.fdn-source {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.fdn-source[data-source='synced'] {
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 50%, transparent);
+}
+
+.fdn-source[data-source='hybrid'] {
+  color: var(--info, #6aa8ff);
+}
+
+.fdn-row-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.fdn-perm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 4px 12px;
+}
+
+.fdn-perm-grid label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.fdn-table small {
+  color: var(--muted);
+}
+
+.fdn-code {
+  font-family: 'Roboto Mono', ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.fdn-audit-row td {
+  vertical-align: top;
+}
+
+.fdn-audit-diff {
+  font-family: 'Roboto Mono', ui-monospace, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  color: var(--muted);
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fdn-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.fdn-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fdn-inline {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.fdn-muted {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.fdn-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 4px 0 10px;
+}

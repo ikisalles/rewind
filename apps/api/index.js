@@ -6,10 +6,13 @@
 // Its web part is registered in apps/web/assets/js/modules.js.
 
 import { createApp, CORE_SHARDS } from '@rewind/core';
+import foundation from '@rewind/foundation/server';
 import retro from '@rewind/retro/server';
 import gmud from '@rewind/gmud/server';
 
-export const MODULES = [retro, gmud];
+// foundation comes first so other modules can rely on its routes being
+// registered and its storage keys being read into the shared shard map.
+export const MODULES = [foundation, retro, gmud];
 
 // Which Durable Object owns each key kind (core + modules), for durableStorage().
 export const SHARDS = Object.assign({}, CORE_SHARDS, ...MODULES.map((m) => m.shards));
