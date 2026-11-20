@@ -1,0 +1,20 @@
+{
+  "name": "@rewind/foundation",
+  "version": "0.1.0",
+  "description": "Rewind transversal foundation: internal identity, groups (distinct from teams), memberships, roles/permissions, identity providers, external identities, entity linking, domain events, audit log and notification preferences — shared by every module.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    "./server": "./server/index.js",
+    "./server/events": "./server/events.js",
+    "./server/rbac": "./server/rbac.js"
+  },
+  "rewind": {
+    "web": "./web",
+    "entry": "./web/index.js"
+  },
+  "peerDependencies": {
+    "@rewind/core": "*"
+  }
+}

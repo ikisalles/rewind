@@ -24,12 +24,13 @@ function setup(env = {}) {
 
 const bootstrap = signupCompany;
 
-test('the API ships the retro and changes (GMUD) modules; GMUD starts off', async () => {
-  assert.deepEqual(MODULES.map((m) => m.id), ['retro', 'gmud']);
+test('the API ships the foundation, retro and GMUD modules; GMUD starts off', async () => {
+  assert.deepEqual(MODULES.map((m) => m.id), ['foundation', 'retro', 'gmud']);
   const { call } = setup();
   const { admin } = await bootstrap(call);
   const dash = (await call('GET', '/api/dashboard', null, admin)).data;
-  assert.deepEqual(dash.modules, ['retro']);
+  // foundation is required (always on); gmud starts off
+  assert.deepEqual(dash.modules, ['foundation', 'retro']);
   assert.ok(Array.isArray(dash.retro.boards));
   assert.equal(dash.admin.onboarding.board, false);
   // retro blocks deleting a team that still has boards
@@ -101,20 +102,21 @@ test('same company name: request waits for admin approval', async () => {
 });
 
 
-test('Administration → Modules: admins see the installed modules; retro is required, GMUD optional', async () => {
+test('Administration → Modules: admins see the installed modules; foundation and retro are required, GMUD optional', async () => {
   const { call } = setup();
   const { admin, bia } = await bootstrap(call);
   const r = await call('GET', '/api/org/modules', null, admin);
   assert.equal(r.status, 200);
   assert.deepEqual(r.data.modules.map(({ id, enabled, required }) => ({ id, enabled, required })), [
+    { id: 'foundation', enabled: true, required: true },
     { id: 'retro', enabled: true, required: true },
     { id: 'gmud', enabled: false, required: false },
   ]);
   assert.ok(r.data.modules.every((m) => m.name && m.description));
   assert.equal((await call('GET', '/api/org/modules', null, bia)).status, 403);
   const on = await call('PATCH', '/api/org/modules/gmud', { enabled: true }, admin);
-  assert.equal(on.data.modules[1].enabled, true);
-  assert.deepEqual((await call('GET', '/api/dashboard', null, bia)).data.modules, ['retro', 'gmud']);
+  assert.equal(on.data.modules.find((m) => m.id === 'gmud').enabled, true);
+  assert.deepEqual((await call('GET', '/api/dashboard', null, bia)).data.modules, ['foundation', 'retro', 'gmud']);
 });
 
 test('groups from the identity provider merge with teams made in Rewind (no duplicates)', async () => {
