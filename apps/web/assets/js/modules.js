@@ -4,5 +4,6 @@
 import foundation from '@rewind/foundation/index.js';
 import retro from '@rewind/retro/index.js';
 import gmud from '@rewind/gmud/index.js';
+import goals from '@rewind/goals/index.js';
 
-export const MODULES = [foundation, retro, gmud];
+export const MODULES = [foundation, retro, gmud, goals];

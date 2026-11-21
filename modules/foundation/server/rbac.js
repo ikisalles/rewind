@@ -5,7 +5,10 @@
 // Permission check never looks at the UI: every HTTP handler calls either
 // hasPermission(effective, 'resource:action') or requires() before mutating.
 
-import { BUILTIN_ROLES, isActive } from './model.js';
+import { BUILTIN_ROLES, isActive, registerPermissions } from './model.js';
+import { K } from './events.js';
+
+export { registerPermissions };
 
 // Combines core admins (role === 'admin') with the organization_owner
 // permissions, so turning the foundation on doesn't downgrade existing admins.
@@ -36,4 +39,17 @@ export function ensureBuiltinRoles(saved) {
   const byKey = new Map(saved.map((r) => [r.key, r]));
   for (const r of BUILTIN_ROLES) if (!byKey.has(r.key)) byKey.set(r.key, r);
   return [...byKey.values()];
+}
+
+// For other modules: the effective permission set of a user, read from the
+// foundation's memberships and roles (the canonical model, spec §4).
+export async function loadPermissions(db, orgId, user, at = new Date().toISOString()) {
+  const [saved, memberships] = await Promise.all([db.list(K.roles(orgId)), db.list(K.memberships(orgId))]);
+  return effectivePermissions(user, memberships, ensureBuiltinRoles(saved), at);
+}
+
+// Active memberships of a user (any scope) — e.g. to know which groups a
+// person belongs to without touching the foundation's keys.
+export async function activeMemberships(db, orgId, userId, at = new Date().toISOString()) {
+  return (await db.list(K.memberships(orgId))).filter((m) => m.userId === userId && isActive(m, at));
 }

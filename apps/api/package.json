@@ -12,6 +12,7 @@
     "@rewind/core": "*",
     "@rewind/foundation": "*",
     "@rewind/retro": "*",
-    "@rewind/gmud": "*"
+    "@rewind/gmud": "*",
+    "@rewind/goals": "*"
   }
 }

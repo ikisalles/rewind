@@ -51,6 +51,18 @@ export const PERMISSIONS = [
   { key: 'module:admin', label: 'Module-level administration' },
 ];
 
+// Modules contribute their own permissions (e.g. "goals:write") at register
+// time, so roles can grant them without the foundation knowing each module.
+export function registerPermissions(list = []) {
+  const known = new Set(PERMISSIONS.map((p) => p.key));
+  for (const p of list) {
+    if (p?.key && /^[a-z][a-z0-9-]*:[a-z*][a-z0-9_*-]*$/.test(p.key) && !known.has(p.key)) {
+      PERMISSIONS.push({ key: p.key, label: str(p.label, 120) || p.key, module: str(p.module, 60) || undefined });
+      known.add(p.key);
+    }
+  }
+}
+
 // Identity provider kinds the architecture is prepared for. "capabilities"
 // declares what the connector can actually do once configured — the foundation
 // never promises universal parity (spec §3.2).
