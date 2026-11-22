@@ -1,6 +1,6 @@
 import { get, post, patch, del } from '@rewind/web/api.js';
 import { h, mount, button, field, badge, table, modal, fmtDate, fmtDateTime, today, attempt, confirmDialog, pageHeader, section } from '@rewind/web/ui.js';
-import { store } from '@rewind/web/app.js';
+import { store, slot } from '@rewind/web/app.js';
 import { loadTemplates, templatePicker } from './templates.js';
 
 export const statusBadge = (sprint) =>
@@ -35,19 +35,21 @@ export async function boardView(root, { params }) {
   const { board, sprints, canManage } = await get(`/api/boards/${params.boardId}`);
   const team = store.me.teams.find((t) => t.id === board.teamId);
 
-  const create = async () => {
+  // newRetro is also offered to other modules (slot ctx): they may create the
+  // retro at a moment of their own flow, passing extra fields their hooks read
+  const create = async ({ initial = { name: `Sprint ${sprints.length + 1}` }, extraBody = {}, title = 'New sprint' } = {}) => {
     const templates = await attempt(loadTemplates);
     if (!templates) return;
     const m = modal({
-      title: 'New sprint',
+      title,
       wide: true,
       body: [
         sprintForm({
           id: 'sprint-form',
-          initial: { name: `Sprint ${sprints.length + 1}` },
+          initial,
           extra: templatePicker(templates),
           onSubmit: async ({ startMode, template, ...data }) => {
-            const body = { ...data, template: startMode === 'blank' ? 'blank' : template };
+            const body = { ...data, ...extraBody, template: startMode === 'blank' ? 'blank' : template };
             const r = await attempt(() => post(`/api/boards/${board.id}/sprints`, body), 'Sprint created');
             if (r) {
               m.close();
@@ -64,7 +66,7 @@ export async function boardView(root, { params }) {
   const rename = () => {
     const m = modal({
       title: 'Edit board',
-      body: h(
+      body: [h(
         'form',
         {
           id: 'rename-form',
@@ -79,6 +81,8 @@ export async function boardView(root, { params }) {
         },
         field('Name', h('input', { name: 'name', value: board.name, required: true, maxlength: 80 })),
       ),
+      // settings other modules keep for this board (each saves its own part)
+      ...slot('retro.board.settings', { board, canManage, reload: () => boardView(root, { params }) })],
       actions: [
         button('Delete board', {
           variant: 'danger-ghost',
@@ -96,15 +100,13 @@ export async function boardView(root, { params }) {
     });
   };
 
-  mount(
-    root,
-    pageHeader(
-      board.name,
-      [canManage && button('', { iconName: 'settings', variant: 'icon', title: 'Edit board', onClick: rename }), button('New sprint', { iconName: 'plus', onClick: create })],
-      [['Boards', '#/boards'], [team?.name || 'Team']],
-    ),
-    section(
-      'Sprints',
+  // Other modules may drive the board with tabs of their own (e.g. backlog and
+  // delivery sprints); the retros then become one tab and are created by that flow.
+  const ctx = { board, sprints, canManage, newRetro: (opts) => create(opts), reload: () => boardView(root, { params }), selectTab: (id) => boardTab.set(board.id, id) };
+  // a module may answer with a promise (its tabs can depend on its data)
+  const tabs = (await Promise.all(slot('retro.board.tabs', ctx))).flat().filter(Boolean);
+  const retros = section(
+      tabs.length ? 'Retrospectives' : 'Sprints',
       table(
         ['Sprint', 'Period', 'Status', 'Created'],
         sprints.map((s) =>
@@ -117,11 +119,34 @@ export async function boardView(root, { params }) {
             h('td', {}, fmtDateTime(s.createdAt)),
           ),
         ),
-        { empty: 'No sprints yet. Create the first one to start the retro.' },
+        { empty: tabs.length ? 'No retrospectives yet. A retro is created when a sprint is completed.' : 'No sprints yet. Create the first one to start the retro.' },
       ),
-    ),
+    );
+  const header = pageHeader(
+    board.name,
+    [canManage && button('', { iconName: 'settings', variant: 'icon', title: 'Edit board', onClick: () => rename() }), tabs.length ? null : button('New sprint', { iconName: 'plus', onClick: () => create() })],
+    [['Boards', '#/boards'], [team?.name || 'Team']],
   );
+  if (!tabs.length) return mount(root, header, retros, slot('retro.board', ctx));
+
+  const all = [...tabs, { id: 'retros', label: 'Retrospectives', render: (el) => mount(el, retros) }];
+  const panel = h('div', { class: 'board-tab-panel' });
+  const bar = h('div', { class: 'tabs', role: 'tablist' });
+  const show = (id) => {
+    const tab = all.find((t) => t.id === id) || all[0];
+    boardTab.set(board.id, tab.id);
+    for (const b of bar.children) {
+      b.setAttribute('aria-selected', String(b.dataset.tab === tab.id));
+      b.classList.toggle('active', b.dataset.tab === tab.id);
+    }
+    tab.render(panel);
+  };
+  for (const t of all) bar.append(h('button', { type: 'button', role: 'tab', class: 'tab', 'data-tab': t.id, onClick: () => show(t.id) }, t.label));
+  mount(root, header, bar, panel, slot('retro.board', ctx));
+  show(boardTab.get(board.id) || all[0].id);
 }
+// the open tab survives going to a sprint and back
+const boardTab = new Map();
 
 // ------------------------------------------------------------- boards list (#/boards)
 export async function boardsListView(root) {

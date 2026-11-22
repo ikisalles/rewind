@@ -7,6 +7,7 @@
 
 import { defineModule, fail, json, newId, randomToken, now, str, isDate, isColor, isoDay } from '@rewind/core';
 import { TEMPLATES, findTemplate, DEFAULT_TEMPLATE } from './templates.js';
+import { runBoardDeleteHooks, runRetroCreateHooks } from './boards.js';
 
 export { TEMPLATES };
 
@@ -258,6 +259,8 @@ export default defineModule({
       const board = await loadBoard(c, c.params.id);
       requireManage(isAdmin(c) || board.createdBy === c.user.id);
       if ((await db.list(K.sprints(board.id))).length) fail(400, "Delete the board's sprints first");
+      // data other modules keep inside the board (e.g. backlog issues) goes with it
+      await runBoardDeleteHooks(db, c.org.id, board);
       await db.delete(K.board(c.org.id, board.id));
       return json({ ok: true });
     });
@@ -294,6 +297,7 @@ export default defineModule({
       const name = str(c.body.name, 80) || fail(400, 'Enter the sprint name');
       if (!isDate(c.body.start) || !isDate(c.body.end)) fail(400, 'Enter valid dates');
       if (c.body.end < c.body.start) fail(400, 'The end date must be after the start date');
+      await runRetroCreateHooks('before', db, c, board, c.body);
       const { template, columns } = startingColumns(c.body);
       const sprint = {
         id: newId(),
@@ -315,6 +319,7 @@ export default defineModule({
       };
       await db.put(K.sprint(board.id, sprint.id), sprint);
       await db.put(K.sprintRef(sprint.id), { orgId: c.org.id, boardId: board.id });
+      await runRetroCreateHooks('after', db, c, board, sprint, c.body);
       return json({ sprint }, 201);
     });
 

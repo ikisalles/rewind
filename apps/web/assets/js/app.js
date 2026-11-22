@@ -59,11 +59,24 @@ export function footer() {
 //       housekeeping: (ctx) => [{ icon, title, hint, href, cta }],  // admin rows
 //       sections: (ctx) => [nodes],                  //   the module's own sections
 //     },
+//     slots: {                                       // optional: pieces shown inside another module's pages,
+//       'retro.board': (ctx) => [nodes],             //   at the named extension points that module offers
+//                                                    //   (a point may accept promises; see the offering module)
+//     },                                             //   (only while this module is on for the company)
 //   });
 
+const defined = [];
 export function defineWebModule(mod) {
   if (!mod?.id) throw new Error('A web module needs an id');
-  return Object.freeze({ routes: [], nav: [], styles: [], home: {}, admin: [], ...mod, base: `./modules/${mod.id}/` });
+  const out = Object.freeze({ routes: [], nav: [], styles: [], home: {}, admin: [], slots: {}, ...mod, base: `./modules/${mod.id}/` });
+  defined.push(out);
+  return out;
+}
+
+// What the enabled modules contribute to an extension point (see "slots" above).
+// The module offering the point only knows its name, never who fills it.
+export function slot(point, ctx) {
+  return defined.filter((m) => m.slots[point] && store.me?.modules?.includes(m.id)).flatMap((m) => m.slots[point](ctx) || []);
 }
 
 // Administration tabs added by the modules the company has on.
