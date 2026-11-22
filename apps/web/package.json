@@ -9,6 +9,7 @@
     "@rewind/retro": "*",
     "@rewind/gmud": "*",
     "@rewind/goals": "*",
-    "@rewind/feedback": "*"
+    "@rewind/feedback": "*",
+    "@rewind/metrics": "*"
   }
 }

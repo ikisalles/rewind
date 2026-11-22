@@ -1,0 +1,20 @@
+{
+  "name": "@rewind/metrics",
+  "version": "0.1.0",
+  "description": "Rewind module: Engineering Metrics — deployment frequency, lead time, change failure rate, MTTR, throughput and PR cycle time per team, with versioned definitions, data coverage and drill-down. Never per person.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    "./server": "./server/index.js",
+    "./server/model": "./server/model.js"
+  },
+  "rewind": {
+    "web": "./web",
+    "entry": "./web/index.js"
+  },
+  "peerDependencies": {
+    "@rewind/core": "*",
+    "@rewind/foundation": "*"
+  }
+}
