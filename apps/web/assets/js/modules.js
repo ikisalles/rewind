@@ -6,5 +6,6 @@ import retro from '@rewind/retro/index.js';
 import gmud from '@rewind/gmud/index.js';
 import goals from '@rewind/goals/index.js';
 import feedback from '@rewind/feedback/index.js';
+import metrics from '@rewind/metrics/index.js';
 
-export const MODULES = [foundation, retro, gmud, goals, feedback];
+export const MODULES = [foundation, retro, gmud, goals, feedback, metrics];
