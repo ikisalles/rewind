@@ -1,0 +1,20 @@
+{
+  "name": "@rewind/feedback",
+  "version": "0.1.0",
+  "description": "Rewind module: Feedback & Recognition — kudos, feedback and requests with explicit audiences, personal history and next steps. No scores or rankings.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    "./server": "./server/index.js",
+    "./server/model": "./server/model.js"
+  },
+  "rewind": {
+    "web": "./web",
+    "entry": "./web/index.js"
+  },
+  "peerDependencies": {
+    "@rewind/core": "*",
+    "@rewind/foundation": "*"
+  }
+}
