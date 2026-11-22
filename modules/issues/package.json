@@ -1,0 +1,20 @@
+{
+  "name": "@rewind/issues",
+  "version": "0.1.0",
+  "description": "Rewind module: Issues — each team board's backlog, created by hand or read from Jira (filtered by Jira Team). Shown only inside the board.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    "./server": "./server/index.js",
+    "./server/model": "./server/model.js"
+  },
+  "rewind": {
+    "web": "./web",
+    "entry": "./web/index.js"
+  },
+  "peerDependencies": {
+    "@rewind/core": "*",
+    "@rewind/retro": "*"
+  }
+}

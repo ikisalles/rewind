@@ -12,10 +12,11 @@ import gmud from '@rewind/gmud/server';
 import goals from '@rewind/goals/server';
 import feedback from '@rewind/feedback/server';
 import metrics from '@rewind/metrics/server';
+import issues from '@rewind/issues/server';
 
 // foundation comes first so other modules can rely on its routes being
 // registered and its storage keys being read into the shared shard map.
-export const MODULES = [foundation, retro, gmud, goals, feedback, metrics];
+export const MODULES = [foundation, retro, gmud, goals, feedback, metrics, issues];
 
 // Which Durable Object owns each key kind (core + modules), for durableStorage().
 export const SHARDS = Object.assign({}, CORE_SHARDS, ...MODULES.map((m) => m.shards));

@@ -25,7 +25,7 @@ function setup(env = {}) {
 const bootstrap = signupCompany;
 
 test('the API ships the foundation, retro, GMUD and goals modules; GMUD starts off', async () => {
-  assert.deepEqual(MODULES.map((m) => m.id), ['foundation', 'retro', 'gmud', 'goals', 'feedback', 'metrics']);
+  assert.deepEqual(MODULES.map((m) => m.id), ['foundation', 'retro', 'gmud', 'goals', 'feedback', 'metrics', 'issues']);
   const { call } = setup();
   const { admin } = await bootstrap(call);
   const dash = (await call('GET', '/api/dashboard', null, admin)).data;
@@ -114,6 +114,7 @@ test('Administration → Modules: admins see the installed modules; foundation a
     { id: 'goals', enabled: true, required: false },
     { id: 'feedback', enabled: true, required: false },
     { id: 'metrics', enabled: true, required: false },
+    { id: 'issues', enabled: false, required: false },
   ]);
   assert.ok(r.data.modules.every((m) => m.name && m.description));
   assert.equal((await call('GET', '/api/org/modules', null, bia)).status, 403);

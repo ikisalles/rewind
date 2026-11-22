@@ -77,7 +77,9 @@ const server = createServer(async (req, res) => {
     if (!file || !existsSync(file)) file = join(shellDir, 'index.html');
     let body = await readFile(file);
     if (file === join(shellDir, 'index.html')) body = renderIndex(body.toString('utf8'), mounts);
-    res.writeHead(200, { 'content-type': TYPES[extname(file)] || 'application/octet-stream' });
+    // sources are served as-is (no versioned build here): always revalidate, so a new module or
+    // an edited file shows up on the next reload instead of an old copy from the browser cache
+    res.writeHead(200, { 'content-type': TYPES[extname(file)] || 'application/octet-stream', 'cache-control': 'no-cache' });
     res.end(body);
   } catch (e) {
     console.error(e);

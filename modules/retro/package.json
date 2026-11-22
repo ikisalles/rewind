@@ -6,7 +6,8 @@
   "type": "module",
   "private": true,
   "exports": {
-    "./server": "./server/index.js"
+    "./server": "./server/index.js",
+    "./server/boards": "./server/boards.js"
   },
   "rewind": {
     "web": "./web",

@@ -10,6 +10,7 @@
     "@rewind/gmud": "*",
     "@rewind/goals": "*",
     "@rewind/feedback": "*",
-    "@rewind/metrics": "*"
+    "@rewind/metrics": "*",
+    "@rewind/issues": "*"
   }
 }
