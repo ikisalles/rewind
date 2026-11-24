@@ -231,17 +231,27 @@ function requestsSection(requests, allTeams, reload) {
           class: 'stack',
           onSubmit: async (e) => {
             e.preventDefault();
-            const teamIds = new FormData(e.target).getAll('teamIds');
+            const fd = new FormData(e.target);
+            const teamIds = fd.getAll('teamIds');
+            const role = fd.get('role') === 'admin' ? 'admin' : 'member';
             if (!teamIds.length) return void toast('Pick at least one team', 'error');
-            const r = await attempt(() => post(`/api/org/requests/${req.id}/approve`, { teamIds }));
+            const r = await attempt(() => post(`/api/org/requests/${req.id}/approve`, { teamIds, role }));
             if (r) {
               dlg.close();
-              after(req, r, `${req.name} joined ${org.name}`);
+              after(req, r, `${req.name} joined ${org.name}${role === 'admin' ? ' as an admin' : ''}`);
             }
           },
         },
-        h('p', { class: 'muted small' }, `${req.name} joins as a member and only sees the boards of the teams you pick.`),
+        h('p', { class: 'muted small' }, `${req.name} (${req.email}) asked to join ${org.name}. Pick their teams and role.`),
         h('fieldset', { class: 'checks' }, h('legend', {}, 'Teams'), allTeams.map((t) => h('label', {}, h('input', { type: 'checkbox', name: 'teamIds', value: t.id, checked: t.id === org.defaultTeamId }), t.name))),
+        // same roles and explanations as invites
+        h(
+          'fieldset',
+          { class: 'checks role-choice' },
+          h('legend', {}, 'Role'),
+          h('label', {}, h('input', { type: 'radio', name: 'role', value: 'member', checked: true }), h('span', {}, h('strong', {}, 'Member'), h('span', { class: 'muted small block' }, "Takes part in their teams' retros and sees only those teams' boards."))),
+          h('label', {}, h('input', { type: 'radio', name: 'role', value: 'admin' }), h('span', {}, h('strong', {}, 'Admin'), h('span', { class: 'muted small block' }, 'Manages the company (people, teams, invites, modules, sign-in) and sees every board.'))),
+        ),
       ),
       actions: [button('Cancel', { onClick: () => dlg.close() }), h('button', { class: 'btn btn-primary', type: 'submit', form: 'approve-form' }, 'Approve')],
     });

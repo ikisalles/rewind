@@ -435,3 +435,6 @@ a.dash-card:hover { background: var(--surface2); }
 .managed-notice { border-color: color-mix(in srgb, var(--link) 35%, var(--border)); }
 .managed-head { display: flex; align-items: center; gap: 8px; color: var(--link); }
 .managed-head strong { color: var(--text); }
+
+.role-choice label { align-items: flex-start; }
+.role-choice input { margin-top: 3px; }
