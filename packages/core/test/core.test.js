@@ -504,3 +504,24 @@ test('company logo: fetched from the company site when a sign-in is connected, s
     globalThis.fetch = realFetch;
   }
 });
+
+test('My account → Password: change it with the current one, then sign in with the new one', async () => {
+  const { call } = setup();
+  const { admin } = await signupCompany(call);
+  assert.deepEqual((await call('GET', '/api/me', null, admin)).data.password, { set: true, usable: true });
+
+  const wrong = await call('PUT', '/api/me/password', { current: 'nope-nope', password: 'brand-new-pass' }, admin);
+  assert.equal(wrong.status, 400);
+  assert.equal(wrong.data.code, 'wrong_password');
+  assert.equal((await call('PUT', '/api/me/password', { current: 'strong-pass', password: 'short' }, admin)).status, 400);
+  assert.equal((await call('PUT', '/api/me/password', { current: 'strong-pass', password: 'strong-pass' }, admin)).status, 400);
+  assert.equal((await call('PUT', '/api/me/password', { current: 'strong-pass', password: 'brand-new-pass' })).status, 401);
+
+  const ok = await call('PUT', '/api/me/password', { current: 'strong-pass', password: 'brand-new-pass' }, admin);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.data.created, false);
+  assert.equal((await call('POST', '/api/auth/login', { email: 'ana@acme.io', password: 'strong-pass' })).status, 401);
+  assert.equal((await call('POST', '/api/auth/login', { email: 'ana@acme.io', password: 'brand-new-pass' })).status, 200);
+  // the session in use keeps working
+  assert.equal((await call('GET', '/api/me', null, admin)).status, 200);
+});

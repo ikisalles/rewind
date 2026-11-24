@@ -194,3 +194,22 @@ test('groups from the identity provider merge with teams made in Rewind (no dupl
     globalThis.fetch = realFetch;
   }
 });
+
+test('approving an access request sets the role at once (member by default, or admin)', async () => {
+  const { call } = setup();
+  const { admin, me } = await bootstrap(call);
+  const ask = async (name, email) => {
+    await call('POST', '/api/auth/signup', { orgName: 'ACME', name, email, password: 'strong-pass' });
+    return (await call('GET', '/api/org/requests', null, admin)).data.requests.find((r) => r.email === email);
+  };
+  const dan = await ask('Dan', 'dan@x.io');
+  const asAdmin = await call('POST', `/api/org/requests/${dan.id}/approve`, { teamIds: [me.org.defaultTeamId], role: 'admin' }, admin);
+  assert.equal(asAdmin.data.member.role, 'admin');
+  const danToken = (await call('POST', '/api/auth/login', { email: 'dan@x.io', password: 'strong-pass' })).data.token;
+  assert.equal((await call('GET', '/api/me', null, danToken)).data.user.role, 'admin');
+  assert.equal((await call('GET', '/api/org/requests', null, danToken)).status, 200); // admin rights right away
+
+  const eve = await ask('Eve', 'eve@x.io');
+  const plain = await call('POST', `/api/org/requests/${eve.id}/approve`, { teamIds: [me.org.defaultTeamId], role: 'superuser' }, admin);
+  assert.equal(plain.data.member.role, 'member'); // anything else is a member
+});

@@ -19,12 +19,17 @@ export const shardOf = (key, shards = {}) => {
   return rule && owner ? `${rule}:${owner}` : 'global';
 };
 
+// e-mail addresses stay out of the logs
+const logKey = (key) => key.split(':').map((part) => (part.includes('@') ? '<email>' : part)).join(':');
+
 export function durableStorage(namespace, { shards = {} } = {}) {
   const call = async (key, body) => {
-    const stub = namespace.get(namespace.idFromName(`rewind-store:${shardOf(key, shards)}`));
+    const shard = shardOf(key, shards);
+    const stub = namespace.get(namespace.idFromName(`rewind-store:${shard}`));
     const res = await stub.fetch('https://rewind-store/op', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const data = await res.json().catch(() => ({ ok: false, error: `store answered ${res.status}` }));
-    if (!data.ok) throw new Error(`RewindStore: ${data.error}`);
+    // which object and which kind of key failed, for the logs (never sent to the client)
+    if (!data.ok) throw new Error(`RewindStore: ${data.error} [shard=${shard} op=${body.op} key=${logKey(key)}]`);
     return data.result;
   };
   return {

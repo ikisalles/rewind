@@ -664,7 +664,27 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     const org = { ...c.org, logo: publicLogo(c.org, auth) };
     // how this person signs in, when a provider manages their account (names of the providers)
     const managedBy = c.user.providers?.length ? c.user.providers.map((id) => labelOf(id, auth.providers[id])) : [];
-    return json({ user: c.user, org, teams, pendingRequests, managedBy, modules: enabledModules(c.org).map((m) => m.id) });
+    // set: has a Rewind password; usable: the company still lets this person sign in with it
+    const password = { set: Boolean(await db.get(K.cred(c.user.id))), usable: !ssoRequired(auth, c.user) };
+    return json({ user: c.user, org, teams, pendingRequests, managedBy, password, modules: enabledModules(c.org).map((m) => m.id) });
+  });
+
+  // Change (or, for someone who only signed in through a provider, create) your Rewind password.
+  // The current one is required when there is one. Your other sessions stay signed in.
+  route('PUT', '/api/me/password', async (c) => {
+    const auth = await orgAuth(c.org.id);
+    if (ssoRequired(auth, c.user)) fail(403, `${c.org.name} signs in with ${readyProviders(auth).map((p) => p.label).join(' or ')}: Rewind passwords aren't used.`, 'sso_required');
+    const next = typeof c.body.password === 'string' ? c.body.password : '';
+    if (next.length < 8) fail(400, 'Password must be at least 8 characters');
+    if (next.length > 200) fail(400, 'Password is too long');
+    const cred = await db.get(K.cred(c.user.id));
+    if (cred) {
+      const current = typeof c.body.current === 'string' ? c.body.current : '';
+      if (!(await verifyPassword(current, cred.hash))) fail(400, 'Your current password is wrong', 'wrong_password');
+      if (await verifyPassword(next, cred.hash)) fail(400, 'The new password must be different from the current one');
+    }
+    await db.put(K.cred(c.user.id), { hash: await hashPassword(next) });
+    return json({ ok: true, created: !cred });
   });
 
   // ------------------------------------------------------------ join requests (admin)
@@ -694,16 +714,17 @@ export function createApp({ storage, env = {}, modules = [], consistency = 'stro
     }
     const valid = new Set((await db.list(K.teams(c.org.id))).map((t) => t.id));
     const teamIds = (Array.isArray(c.body.teamIds) ? c.body.teamIds : []).filter((id) => valid.has(id));
-    // Approved people join as members: they only see the boards of their own teams.
-    const user = await createUser(c.org, { email: jr.email, name: jr.name, role: 'member', teamIds: teamIds.length ? teamIds : [c.org.defaultTeamId] });
+    // The admin picks the role while approving (member by default: they only see their teams' boards).
+    const role = c.body.role === 'admin' ? 'admin' : 'member';
+    const user = await createUser(c.org, { email: jr.email, name: jr.name, role, teamIds: teamIds.length ? teamIds : [c.org.defaultTeamId] });
     await db.put(K.cred(user.id), { hash: jr.hash });
     const emailSent = await sendEmail({
       to: jr.email,
       subject: `You're in: ${c.org.name} on Rewind`,
-      html: `<p>An admin approved your access to <b>${escapeHtml(c.org.name)}</b> on Rewind.</p>
+      html: `<p>An admin approved your access to <b>${escapeHtml(c.org.name)}</b> on Rewind${role === 'admin' ? ', as an admin' : ''}.</p>
              <p><a href="${appUrl(c.req)}/#/login">Sign in</a> with the email and password you registered.</p>`,
     });
-    return json({ member: { id: user.id, name: user.name, email: user.email, teamIds: user.teamIds }, emailSent });
+    return json({ member: { id: user.id, name: user.name, email: user.email, role: user.role, teamIds: user.teamIds }, emailSent });
   });
 
   route('POST', '/api/org/requests/:id/deny', async (c) => {

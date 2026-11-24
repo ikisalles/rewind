@@ -68,7 +68,8 @@ export function footer() {
 const defined = [];
 export function defineWebModule(mod) {
   if (!mod?.id) throw new Error('A web module needs an id');
-  const out = Object.freeze({ routes: [], nav: [], styles: [], home: {}, admin: [], slots: {}, ...mod, base: `./modules/${mod.id}/` });
+  // the module's folder, relative to this file: works in development and in versioned builds (_v/<hash>/)
+  const out = Object.freeze({ routes: [], nav: [], styles: [], home: {}, admin: [], slots: {}, ...mod, base: new URL(`../../modules/${mod.id}/`, import.meta.url).href });
   defined.push(out);
   return out;
 }

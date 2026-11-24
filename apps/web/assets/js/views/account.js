@@ -29,6 +29,7 @@ const INTEGRATIONS = {
 const SECTIONS = [
   ['profile', 'Basic info', 'user'],
   ['integrations', 'Integrations', 'plug', Object.entries(INTEGRATIONS).map(([id, i]) => [`integrations/${id}`, i.name, i.icon])],
+  ['password', 'Password', 'lock'],
   ['appearance', 'Appearance', 'palette'],
 ];
 
@@ -52,6 +53,7 @@ export async function accountView(root, { params }) {
     return integrationForm(body, params.provider);
   }
   if (current === 'integrations') return integrationsOverview(body);
+  if (current === 'password') return passwordForm(body);
   if (current === 'appearance') return appearance(body);
   return profile(body);
 }
@@ -104,6 +106,67 @@ function managedNotice() {
       : null,
     h('p', { class: 'muted small' }, 'Leaving a group there doesn’t remove you from its team here: ask a Rewind admin.'),
   );
+}
+
+// ------------------------------------------------------------------ password
+// Change your Rewind password (the current one is asked for), or create one if you have only
+// signed in through a provider. Not offered when the company requires its sign-in provider.
+function passwordForm(root) {
+  const state = store.me.password || { set: true, usable: true };
+  if (!state.usable) {
+    return mount(
+      root,
+      h(
+        'div',
+        { class: 'panel stack-sm managed-notice' },
+        h('div', { class: 'managed-head' }, icon('lock', 16), h('strong', {}, 'Your company signs in with its provider')),
+        h('p', { class: 'small' }, `${store.me.org.name} requires its sign-in provider, so Rewind passwords aren't used. To change your password, change it there.`),
+      ),
+    );
+  }
+  const input = (name, autocomplete, attrs = {}) => h('input', { name, type: 'password', autocomplete, required: true, maxlength: 200, ...attrs });
+  const current = state.set ? input('current', 'current-password') : null;
+  const next = input('password', 'new-password', { minlength: 8 });
+  const confirm = input('confirm', 'new-password', { minlength: 8 });
+  const saveBtn = button(state.set ? 'Change password' : 'Create password', { type: 'submit', variant: 'primary' });
+  const form = h(
+    'form',
+    {
+      class: 'panel stack',
+      onSubmit: async (e) => {
+        e.preventDefault();
+        confirm.setCustomValidity(next.value === confirm.value ? '' : 'The passwords don’t match');
+        if (!form.reportValidity()) return;
+        saveBtn.disabled = true;
+        const r = await attempt(
+          () => put('/api/me/password', { current: current?.value || '', password: next.value }),
+          state.set ? 'Password changed' : 'Password created: you can also sign in with your email',
+        );
+        saveBtn.disabled = false;
+        if (!r) return current?.focus();
+        store.me.password = { ...state, set: true };
+        passwordForm(root);
+      },
+    },
+    h(
+      'div',
+      {},
+      h('h3', {}, state.set ? 'Change password' : 'Create a password'),
+      h(
+        'p',
+        { class: 'muted small' },
+        state.set
+          ? 'The password you use to sign in to Rewind with your email. You stay signed in on this and your other devices.'
+          : 'You sign in through a provider. A Rewind password lets you also sign in with your email.',
+      ),
+    ),
+    current ? field('Current password', current) : null,
+    field('New password', next, 'At least 8 characters'),
+    field('Confirm new password', confirm),
+    h('div', { class: 'form-actions' }, saveBtn),
+  );
+  confirm.addEventListener('input', () => confirm.setCustomValidity(''));
+  mount(root, form);
 }
 
 // ------------------------------------------------------------------ appearance
